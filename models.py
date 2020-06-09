@@ -131,6 +131,26 @@ class RewardModel(jit.ScriptModule):
     return reward
 
 
+class PolicyNet(jit.ScriptModule):
+  def __init__(self, embedding_size, hidden_size, action_size, activation_function='relu'):
+    super().__init__()
+    self.act_fn = getattr(F, activation_function)
+    self.fc1 = nn.Linear(embedding_size, hidden_size)
+    self.rnn = nn.GRUCell(hidden_size, hidden_size)
+    self.fc2 = nn.Linear(hidden_size, action_size)
+
+  @jit.script_method
+  def forward(self, prev_state, observations):
+    T = observations.size(0)
+    actions = [torch.empty(0)] * T
+    for t in range(T):
+      hidden = self.act_fn(self.fc1(observations[t]))
+      hidden = self.rnn(hidden, prev_state)
+      prev_state = hidden
+      actions[t] = self.fc2(hidden)
+    return actions, prev_state
+
+
 class SymbolicEncoder(jit.ScriptModule):
   def __init__(self, observation_size, embedding_size, activation_function='relu'):
     super().__init__()
@@ -145,6 +165,9 @@ class SymbolicEncoder(jit.ScriptModule):
     hidden = self.act_fn(self.fc2(hidden))
     hidden = self.fc3(hidden)
     return hidden
+
+
+
 
 
 class VisualEncoder(jit.ScriptModule):
