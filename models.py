@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Tuple
 import torch
 from torch import jit, nn
 from torch.nn import functional as F
@@ -140,13 +140,13 @@ class PolicyNet(jit.ScriptModule):
     self.fc2 = nn.Linear(hidden_size, action_size)
 
   @jit.script_method
-  def forward(self, prev_state, observations):
+  def forward(self, prev_state:torch.Tensor, observations:torch.Tensor, nonterminals:Optional[torch.Tensor]=None) -> Tuple[List[torch.Tensor], torch.Tensor]:
     T = observations.size(0)
     actions = [torch.empty(0)] * T
     for t in range(T):
       hidden = self.act_fn(self.fc1(observations[t]))
       hidden = self.rnn(hidden, prev_state)
-      prev_state = hidden
+      prev_state = hidden if nonterminals is None else hidden * nonterminals[t]
       actions[t] = self.fc2(hidden)
     return actions, prev_state
 

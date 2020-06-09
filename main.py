@@ -11,7 +11,7 @@ from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 from env import CONTROL_SUITE_ENVS, Env, GYM_ENVS, EnvBatcher
 from memory import ExperienceReplay
-from models import bottle, Encoder, ObservationModel, RewardModel, TransitionModel
+from models import bottle, Encoder, ObservationModel, RewardModel, TransitionModel, PolicyNet
 from planner import MPCPlanner
 from utils import lineplot, write_video
 import ipdb
@@ -79,7 +79,7 @@ if torch.cuda.is_available() and not args.disable_cuda:
   print("Using GPU...")
 else:
   args.device = torch.device('cpu')
-metrics = {'steps': [], 'episodes': [], 'train_rewards': [], 'test_episodes': [], 'test_rewards': [], 'observation_loss': [], 'reward_loss': [], 'kl_loss': []}
+metrics = {'steps': [], 'episodes': [], 'train_rewards': [], 'test_episodes': [], 'test_rewards': [], 'observation_loss': [], 'reward_loss': [], 'kl_loss': [], 'policy_loss': []}
 
 
 # Initialise training environment and experience replay memory
@@ -107,7 +107,8 @@ transition_model = TransitionModel(args.belief_size, args.state_size, env.action
 observation_model = ObservationModel(args.symbolic_env, env.observation_size, args.belief_size, args.state_size, args.embedding_size, args.activation_function).to(device=args.device)
 reward_model = RewardModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
 encoder = Encoder(args.symbolic_env, env.observation_size, args.embedding_size, args.activation_function).to(device=args.device)
-param_list = list(transition_model.parameters()) + list(observation_model.parameters()) + list(reward_model.parameters()) + list(encoder.parameters())
+policy_net = PolicyNet(args.embedding_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
+param_list = list(transition_model.parameters()) + list(observation_model.parameters()) + list(reward_model.parameters()) + list(encoder.parameters()) + list(policy_net.parameters())
 optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
 if args.models is not '' and os.path.exists(args.models):
   model_dicts = torch.load(args.models)
@@ -115,6 +116,7 @@ if args.models is not '' and os.path.exists(args.models):
   observation_model.load_state_dict(model_dicts['observation_model'])
   reward_model.load_state_dict(model_dicts['reward_model'])
   encoder.load_state_dict(model_dicts['encoder'])
+  policy_net.load_state_dict(model_dicts['policy_net'])
   optimiser.load_state_dict(model_dicts['optimiser'])
 planner = MPCPlanner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, env.action_range[0], env.action_range[1])
 global_prior = Normal(torch.zeros(args.batch_size, args.state_size, device=args.device), torch.ones(args.batch_size, args.state_size, device=args.device))  # Global prior N(0, I)
@@ -167,13 +169,17 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
     observations, actions, rewards, nonterminals = D.sample(args.batch_size, args.chunk_size)  # Transitions start at time t = 0
     # Create initial belief and state for time t = 0
     init_belief, init_state = torch.zeros(args.batch_size, args.belief_size, device=args.device), torch.zeros(args.batch_size, args.state_size, device=args.device)
+    encoded_obs = bottle(encoder, (observations, ))
     # Update belief/state using posterior from previous belief/state, previous action and current observation (over entire sequence at once)
-    ipdb.set_trace()
-    beliefs, prior_states, prior_means, prior_std_devs, posterior_states, posterior_means, posterior_std_devs = transition_model(init_state, actions[:-1], init_belief, bottle(encoder, (observations[1:], )), nonterminals[:-1])
+    beliefs, prior_states, prior_means, prior_std_devs, posterior_states, posterior_means, posterior_std_devs = transition_model(init_state, actions[:-1], init_belief, encoded_obs[1:], nonterminals[:-1])
     # Calculate observation likelihood, reward likelihood and KL losses (for t = 0 only for latent overshooting); sum over final dims, average over batch and time (original implementation, though paper seems to miss 1/T scaling?)
     observation_loss = F.mse_loss(bottle(observation_model, (beliefs, posterior_states)), observations[1:], reduction='none').sum(dim=2 if args.symbolic_env else (2, 3, 4)).mean(dim=(0, 1))
     reward_loss = F.mse_loss(bottle(reward_model, (beliefs, posterior_states)), rewards[:-1], reduction='none').mean(dim=(0, 1))
     kl_loss = torch.max(kl_divergence(Normal(posterior_means, posterior_std_devs), Normal(prior_means, prior_std_devs)).sum(dim=2), free_nats).mean(dim=(0, 1))  # Note that normalisation by overshooting distance and weighting by overshooting distance cancel out
+    
+    prev_policy_state = torch.zeros(args.batch_size, args.hidden_size, device=args.device)
+    policy_actions, prev_policy_state = policy_net(prev_policy_state, encoded_obs, nonterminals)
+    policy_loss = F.mse_loss(torch.stack(policy_actions), actions, reduction='none').mean()
 
     # Apply linearly ramping learning rate schedule
     if args.learning_rate_schedule != 0:
@@ -181,20 +187,22 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
         group['lr'] = min(group['lr'] + args.learning_rate / args.learning_rate_schedule, args.learning_rate)
     # Update model parameters
     optimiser.zero_grad()
-    (observation_loss + reward_loss + kl_loss).backward()
+    (observation_loss + reward_loss + kl_loss + policy_loss).backward()
     nn.utils.clip_grad_norm_(param_list, args.grad_clip_norm, norm_type=2)
     optimiser.step()
     # Store (0) observation loss (1) reward loss (2) KL loss
-    losses.append([observation_loss.item(), reward_loss.item(), kl_loss.item()])
+    losses.append([observation_loss.item(), reward_loss.item(), kl_loss.item(), policy_loss.item()])
 
   # Update and plot loss metrics
   losses = tuple(zip(*losses))
   metrics['observation_loss'].append(losses[0])
   metrics['reward_loss'].append(losses[1])
   metrics['kl_loss'].append(losses[2])
+  metrics['policy_loss'].append(losses[3])
   lineplot(metrics['episodes'][-len(metrics['observation_loss']):], metrics['observation_loss'], 'observation_loss', results_dir)
   lineplot(metrics['episodes'][-len(metrics['reward_loss']):], metrics['reward_loss'], 'reward_loss', results_dir)
   lineplot(metrics['episodes'][-len(metrics['kl_loss']):], metrics['kl_loss'], 'kl_loss', results_dir)
+  lineplot(metrics['episodes'][-len(metrics['policy_loss']):], metrics['policy_loss'], 'policy_loss', results_dir)
 
 
   # Data collection
@@ -227,6 +235,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
     observation_model.eval()
     reward_model.eval()
     encoder.eval()
+    policy_net.eval()
     # Initialise parallelised test environments
     test_envs = EnvBatcher(Env, (args.env, args.symbolic_env, args.seed, args.max_episode_length, args.action_repeat, args.bit_depth), {}, args.test_episodes)
     
@@ -260,13 +269,14 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
     observation_model.train()
     reward_model.train()
     encoder.train()
+    policy_net.train()
     # Close test environments
     test_envs.close()
 
 
   # Checkpoint models
   if episode % args.checkpoint_interval == 0:
-    torch.save({'transition_model': transition_model.state_dict(), 'observation_model': observation_model.state_dict(), 'reward_model': reward_model.state_dict(), 'encoder': encoder.state_dict(), 'optimiser': optimiser.state_dict()}, os.path.join(results_dir, 'models_%d.pth' % episode))
+    torch.save({'transition_model': transition_model.state_dict(), 'observation_model': observation_model.state_dict(), 'reward_model': reward_model.state_dict(), 'encoder': encoder.state_dict(), 'policy_net' : policy_net.state_dict(), 'optimiser': optimiser.state_dict()}, os.path.join(results_dir, 'models_%d.pth' % episode))
     if args.checkpoint_experience:
       torch.save(D, os.path.join(results_dir, 'experience.pth'))  # Warning: will fail with MemoryError with large memory sizes
 
