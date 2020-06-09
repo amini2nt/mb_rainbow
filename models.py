@@ -132,23 +132,19 @@ class RewardModel(jit.ScriptModule):
 
 
 class PolicyNet(jit.ScriptModule):
-  def __init__(self, embedding_size, hidden_size, action_size, activation_function='relu'):
+  def __init__(self, belief_size, state_size, hidden_size, action_size, activation_function='relu'):
     super().__init__()
     self.act_fn = getattr(F, activation_function)
-    self.fc1 = nn.Linear(embedding_size, hidden_size)
-    self.rnn = nn.GRUCell(hidden_size, hidden_size)
-    self.fc2 = nn.Linear(hidden_size, action_size)
+    self.fc1 = nn.Linear(belief_size + state_size, hidden_size)
+    self.fc2 = nn.Linear(hidden_size, hidden_size)
+    self.fc3 = nn.Linear(hidden_size, action_size)
 
   @jit.script_method
-  def forward(self, prev_state:torch.Tensor, observations:torch.Tensor, nonterminals:Optional[torch.Tensor]=None) -> Tuple[List[torch.Tensor], torch.Tensor]:
-    T = observations.size(0)
-    actions = [torch.empty(0)] * T
-    for t in range(T):
-      hidden = self.act_fn(self.fc1(observations[t]))
-      hidden = self.rnn(hidden, prev_state)
-      prev_state = hidden if nonterminals is None else hidden * nonterminals[t]
-      actions[t] = self.fc2(hidden)
-    return actions, prev_state
+  def forward(self, belief, state):
+    hidden = self.act_fn(self.fc1(torch.cat([belief, state], dim=1)))
+    hidden = self.act_fn(self.fc2(hidden))
+    actions = self.fc3(hidden)
+    return actions
 
 
 class SymbolicEncoder(jit.ScriptModule):
