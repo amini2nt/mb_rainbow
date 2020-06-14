@@ -63,8 +63,8 @@ parser.add_argument('--experience-replay', type=str, default='', metavar='ER', h
 parser.add_argument('--render', action='store_true', help='Render environment')
 # New set of hyper-parameters
 parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigma value for CEM')
-parser.add_argument('--use-policy', type=bool, default=True, help='Use a policy network')
-parser.add_argument('--planner', type=str, default='POPA1Planner', help='Type of planner')
+parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
+parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
 
 args = parser.parse_args()
 args.overshooting_distance = min(args.chunk_size, args.overshooting_distance)  # Overshooting distance cannot be greater than chunk size
