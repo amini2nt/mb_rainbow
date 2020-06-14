@@ -8,13 +8,15 @@ import ipdb
 class MPCPlanner(jit.ScriptModule):
   __constants__ = ['action_size', 'planning_horizon', 'optimisation_iters', 'candidates', 'top_candidates', 'min_action', 'max_action']
 
-  def __init__(self, action_size, planning_horizon, optimisation_iters, candidates, top_candidates, transition_model, reward_model, min_action=-inf, max_action=inf):
+  def __init__(self, action_size, planning_horizon, optimisation_iters, candidates, top_candidates, transition_model, reward_model, min_action=-inf, max_action=inf, initial_sigma=1):
     super().__init__()
     self.transition_model, self.reward_model = transition_model, reward_model
     self.action_size, self.min_action, self.max_action = action_size, min_action, max_action
+    self.initial_sigma = initial_sigma
     self.planning_horizon = planning_horizon
     self.optimisation_iters = optimisation_iters
     self.candidates, self.top_candidates = candidates, top_candidates
+    print(self.initial_sigma)
 
   @jit.script_method
   def forward(self, belief, state):
@@ -22,7 +24,7 @@ class MPCPlanner(jit.ScriptModule):
     B, H, Z = belief.size(0), belief.size(1), state.size(1)
     belief, state = belief.unsqueeze(dim=1).expand(B, self.candidates, H).reshape(-1, H), state.unsqueeze(dim=1).expand(B, self.candidates, Z).reshape(-1, Z)
     # Initialize factorized belief over action sequences q(a_t:t+H) ~ N(0, I)
-    action_mean, action_std_dev = torch.zeros(self.planning_horizon, B, 1, self.action_size, device=belief.device), torch.ones(self.planning_horizon, B, 1, self.action_size, device=belief.device)
+    action_mean, action_std_dev = torch.zeros(self.planning_horizon, B, 1, self.action_size, device=belief.device), torch.ones(self.planning_horizon, B, 1, self.action_size, device=belief.device) * self.initial_sigma
 
     for _ in range(self.optimisation_iters):
       # Evaluate J action sequences from the current belief (over entire sequence at once, batched over particles)
