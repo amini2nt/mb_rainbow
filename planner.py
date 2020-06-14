@@ -20,7 +20,6 @@ class MPCPlanner(jit.ScriptModule):
 
   @jit.script_method
   def forward(self, belief, state):
-    #ipdb.set_trace()
     B, H, Z = belief.size(0), belief.size(1), state.size(1)
     belief, state = belief.unsqueeze(dim=1).expand(B, self.candidates, H).reshape(-1, H), state.unsqueeze(dim=1).expand(B, self.candidates, Z).reshape(-1, Z)
     # Initialize factorized belief over action sequences q(a_t:t+H) ~ N(0, I)
@@ -45,14 +44,15 @@ class MPCPlanner(jit.ScriptModule):
 
 
 # Model-predictive control planner with cross-entropy method and learned transition model
-class POPAPlanner(jit.ScriptModule):
+class POPA1Planner(jit.ScriptModule):
   __constants__ = ['action_size', 'planning_horizon', 'optimisation_iters', 'candidates', 'top_candidates', 'min_action', 'max_action']
 
-  def __init__(self, action_size, planning_horizon, optimisation_iters, candidates, top_candidates, transition_model, reward_model, policy_net, min_action=-inf, max_action=inf):
+  def __init__(self, action_size, planning_horizon, optimisation_iters, candidates, top_candidates, transition_model, reward_model, policy_net, min_action=-inf, max_action=inf, initial_sigma=1):
     super().__init__()
     self.transition_model, self.reward_model = transition_model, reward_model
     self.policy_net = policy_net
     self.action_size, self.min_action, self.max_action = action_size, min_action, max_action
+    self.initial_sigma = initial_sigma
     self.planning_horizon = planning_horizon
     self.optimisation_iters = optimisation_iters
     self.candidates, self.top_candidates = candidates, top_candidates
@@ -60,30 +60,29 @@ class POPAPlanner(jit.ScriptModule):
   @jit.script_method
   def forward(self, belief, state):
     init_actions = []
-    init_gactions = []
+    init_batch_actions = []
     ibelief = belief
     istate = state
     for i in range(0, self.planning_horizon):
-      acs = self.policy_net(ibelief, istate)
-      acs.clamp_(min=self.min_action, max=self.max_action)  # Clip action range
-      init_actions.append(acs)
-      init_gactions.append(acs.unsqueeze(1).expand(acs.shape[0], self.candidates, acs.shape[1]).reshape(-1, acs.shape[1]))
+      actions = self.policy_net(ibelief, istate)
+      actions.clamp_(min=self.min_action, max=self.max_action)  # Clip action range
+      init_actions.append(actions)
+      init_batch_actions.append(actions.unsqueeze(1).expand(actions.shape[0], self.candidates, actions.shape[1]).reshape(-1, actions.shape[1]))
       ibelief, istate, _, _ = self.transition_model(istate, init_actions[-1].unsqueeze(0), ibelief)
       ibelief = ibelief.squeeze(0)
       istate = istate.squeeze(0)
 
-
     init_actions = torch.stack(init_actions)
-    init_gactions = torch.stack(init_gactions)
+    init_batch_actions = torch.stack(init_batch_actions)
 
     B, H, Z = belief.size(0), belief.size(1), state.size(1)
     belief, state = belief.unsqueeze(dim=1).expand(B, self.candidates, H).reshape(-1, H), state.unsqueeze(dim=1).expand(B, self.candidates, Z).reshape(-1, Z)
     # Initialize factorized belief over action sequences q(a_t:t+H) ~ N(0, I)
-    noise_mean, noise_std_dev = torch.zeros(self.planning_horizon, B, 1, self.action_size, device=belief.device), torch.ones(self.planning_horizon, B, 1, self.action_size, device=belief.device)
+    noise_mean, noise_std_dev = torch.zeros(self.planning_horizon, B, 1, self.action_size, device=belief.device), torch.ones(self.planning_horizon, B, 1, self.action_size, device=belief.device)* self.initial_sigma
     for _ in range(self.optimisation_iters):
       # Evaluate J action sequences from the current belief (over entire sequence at once, batched over particles)
       noises = (noise_mean + noise_std_dev * torch.randn(self.planning_horizon, B, self.candidates, self.action_size, device=noise_mean.device)).view(self.planning_horizon, B * self.candidates, self.action_size)  # Sample actions (time x (batch x candidates) x actions)
-      actions = init_gactions + noises #todo: clip noise
+      actions = init_batch_actions + noises
       actions.clamp_(min=self.min_action, max=self.max_action)  # Clip action range
       # Sample next states
       beliefs, states, _, _ = self.transition_model(state, actions, belief)
@@ -96,4 +95,6 @@ class POPAPlanner(jit.ScriptModule):
       # Update belief with new means and standard deviations
       noise_mean, noise_std_dev = best_noises.mean(dim=2, keepdim=True), best_noises.std(dim=2, unbiased=False, keepdim=True)
     # Return first action mean µ_t
-    return init_actions[0] + noise_mean[0].squeeze(dim=1) #not clamped
+    actions = init_actions[0] + noise_mean[0].squeeze(dim=1)
+    actions.clamp_(min=self.min_action, max=self.max_action)  # Clip action range
+    return actions
