@@ -81,7 +81,6 @@ class POPA1Planner(jit.ScriptModule):
     noise_mean, noise_std_dev = torch.zeros(self.planning_horizon, B, 1, self.action_size, device=belief.device), torch.ones(self.planning_horizon, B, 1, self.action_size, device=belief.device)* self.initial_sigma
     for _ in range(self.optimisation_iters):
       # Evaluate J action sequences from the current belief (over entire sequence at once, batched over particles)
-      ipdb.set_trace()
       noises = (noise_mean + noise_std_dev * torch.randn(self.planning_horizon, B, self.candidates, self.action_size, device=noise_mean.device)).view(self.planning_horizon, B * self.candidates, self.action_size)  # Sample actions (time x (batch x candidates) x actions)
       actions = init_batch_actions + noises
       actions.clamp_(min=self.min_action, max=self.max_action)  # Clip action range

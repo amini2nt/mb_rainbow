@@ -19,7 +19,7 @@ import ipdb
 
 # Hyperparameters
 parser = argparse.ArgumentParser(description='PlaNet')
-parser.add_argument('--id', type=str, default='popa2_sum', help='Experiment ID')
+parser.add_argument('--id', type=str, default='popa2_trial', help='Experiment ID')
 parser.add_argument('--seed', type=int, default=1, metavar='S', help='Random seed')
 parser.add_argument('--disable-cuda', action='store_true', help='Disable CUDA')
 parser.add_argument('--env', type=str, default='cheetah-run', choices=GYM_ENVS + CONTROL_SUITE_ENVS, help='Gym/Control Suite environment')
@@ -65,6 +65,7 @@ parser.add_argument('--render', action='store_true', help='Render environment')
 parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigma value for CEM')
 parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
 parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
+parser.add_argument('--policy-reduce', type=str, default='mean', help='policy loss reduction')
 
 args = parser.parse_args()
 args.overshooting_distance = min(args.chunk_size, args.overshooting_distance)  # Overshooting distance cannot be greater than chunk size
@@ -199,7 +200,11 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
     reward_loss = F.mse_loss(bottle(reward_model, (beliefs, posterior_states)), rewards[:-1], reduction='none').mean(dim=(0, 1))
     kl_loss = torch.max(kl_divergence(Normal(posterior_means, posterior_std_devs), Normal(prior_means, prior_std_devs)).sum(dim=2), free_nats).mean(dim=(0, 1))  # Note that normalisation by overshooting distance and weighting by overshooting distance cancel out
     if args.use_policy:
-      policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none').sum()
+      policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
+      if args.policy_reduce == 'sum':
+        policy_loss = policy_loss.sum()
+      else:
+        policy_loss = policy_loss.mean()
 
     # Apply linearly ramping learning rate schedule
     if args.learning_rate_schedule != 0:
