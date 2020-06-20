@@ -135,17 +135,20 @@ class PolicyNet(jit.ScriptModule):
   def __init__(self, belief_size, state_size, hidden_size, action_size, activation_function='relu'):
     super().__init__()
     self.act_fn = getattr(F, activation_function)
+    self.hidden_size = hidden_size
     self.fc1 = nn.Linear(belief_size + state_size, hidden_size)
     self.fc2 = nn.Linear(hidden_size, hidden_size)
     self.fc3 = nn.Linear(hidden_size, action_size)
 
   @jit.script_method
-  def forward(self, belief, state):
+  def forward(self, belief:torch.Tensor, state:torch.Tensor, noise:Optional[torch.Tensor]=None):
     hidden = self.act_fn(self.fc1(torch.cat([belief, state], dim=1)))
-    hidden = self.act_fn(self.fc2(hidden))
+    hidden = self.fc2(hidden)
+    if noise is not None:
+      hidden += self.fc2(noise)
+    hidden = self.act_fn(hidden)
     actions = self.fc3(hidden)
     return actions
-
 
 class SymbolicEncoder(jit.ScriptModule):
   def __init__(self, observation_size, embedding_size, activation_function='relu'):

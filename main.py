@@ -12,14 +12,14 @@ from tqdm import tqdm
 from env import CONTROL_SUITE_ENVS, Env, GYM_ENVS, EnvBatcher
 from memory import ExperienceReplay
 from models import bottle, Encoder, ObservationModel, RewardModel, TransitionModel, PolicyNet
-from planner import MPCPlanner, POPA1Planner, POPA2Planner
+from planner import MPCPlanner, POPA1Planner, POPA2Planner, POP_P_Planner
 from utils import lineplot, write_video
 import ipdb
 
 
 # Hyperparameters
 parser = argparse.ArgumentParser(description='PlaNet')
-parser.add_argument('--id', type=str, default='popa2_trial', help='Experiment ID')
+parser.add_argument('--id', type=str, default='pop_lnoise', help='Experiment ID')
 parser.add_argument('--seed', type=int, default=1, metavar='S', help='Random seed')
 parser.add_argument('--disable-cuda', action='store_true', help='Disable CUDA')
 parser.add_argument('--env', type=str, default='cheetah-run', choices=GYM_ENVS + CONTROL_SUITE_ENVS, help='Gym/Control Suite environment')
@@ -63,8 +63,8 @@ parser.add_argument('--experience-replay', type=str, default='', metavar='ER', h
 parser.add_argument('--render', action='store_true', help='Render environment')
 # New set of hyper-parameters
 parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigma value for CEM')
-parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
-parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
+parser.add_argument('--use-policy', type=bool, default=True, help='Use a policy network')
+parser.add_argument('--planner', type=str, default='POP_P_Planner', help='Type of planner')
 parser.add_argument('--policy-reduce', type=str, default='mean', help='policy loss reduction')
 
 args = parser.parse_args()
@@ -141,6 +141,10 @@ elif args.planner == "POPA1Planner":
 elif args.planner == "POPA2Planner":
   assert(args.use_policy == True)
   planner = POPA2Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
+elif args.planner == "POP_P_Planner":
+  assert(args.use_policy == True)
+  planner = POP_P_Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
+
 global_prior = Normal(torch.zeros(args.batch_size, args.state_size, device=args.device), torch.ones(args.batch_size, args.state_size, device=args.device))  # Global prior N(0, I)
 free_nats = torch.full((1, ), args.free_nats, dtype=torch.float32, device=args.device)  # Allowed deviation in KL divergence
 
