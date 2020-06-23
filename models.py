@@ -2,6 +2,7 @@ from typing import Optional, List, Tuple
 import torch
 from torch import jit, nn
 from torch.nn import functional as F
+import ipdb
 
 
 # Wraps the input tuple for a function to process a time x batch x features sequence in batch x features (assumes one output)
@@ -136,19 +137,29 @@ class PolicyNet(jit.ScriptModule):
     super().__init__()
     self.act_fn = getattr(F, activation_function)
     self.hidden_size = hidden_size
+    self.belief_size = belief_size
+    self.state_size = state_size
     self.fc1 = nn.Linear(belief_size + state_size, hidden_size)
     self.fc2 = nn.Linear(hidden_size, hidden_size)
     self.fc3 = nn.Linear(hidden_size, action_size)
+    self.num_units = belief_size + state_size + 2*hidden_size
 
   @jit.script_method
   def forward(self, belief:torch.Tensor, state:torch.Tensor, noise:Optional[torch.Tensor]=None):
-    hidden = self.act_fn(self.fc1(torch.cat([belief, state], dim=1)))
-    hidden = self.fc2(hidden)
+    hidden = torch.cat([belief, state], dim=1)
     if noise is not None:
-      hidden += self.fc2(noise)
-    hidden = self.act_fn(hidden)
-    actions = self.fc3(hidden)
+      hidden += noise[:, 0:self.belief_size+self.state_size]
+    hidden1 = self.act_fn(self.fc1(hidden))
+
+    if noise is not None:
+      hidden1 += noise[:, self.belief_size+self.state_size:self.belief_size+self.state_size+self.hidden_size]
+    hidden2 = self.act_fn(self.fc2(hidden1))
+    
+    if noise is not None:
+      hidden2 += noise[:, self.belief_size+self.state_size+self.hidden_size:]
+    actions = self.fc3(hidden2)
     return actions
+
 
 class SymbolicEncoder(jit.ScriptModule):
   def __init__(self, observation_size, embedding_size, activation_function='relu'):

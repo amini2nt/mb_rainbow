@@ -265,7 +265,7 @@ class POP_P_Planner(jit.ScriptModule):
     init_state = state
     init_belief = belief
     
-    num_params = self.policy_net.hidden_size
+    num_params = self.policy_net.num_units
     # Initialize factorized belief over action sequences q(a_t:t+H) ~ N(0, I)
     noise_mean, noise_std_dev = torch.zeros(self.planning_horizon, B, 1, num_params, device=belief.device), torch.ones(self.planning_horizon, B, 1, num_params, device=belief.device)* self.initial_sigma
     for _ in range(self.optimisation_iters):
