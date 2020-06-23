@@ -19,7 +19,7 @@ import ipdb
 
 # Hyperparameters
 parser = argparse.ArgumentParser(description='PlaNet')
-parser.add_argument('--id', type=str, default='pop_trial', help='Experiment ID')
+parser.add_argument('--id', type=str, default='pop_trial2', help='Experiment ID')
 parser.add_argument('--seed', type=int, default=1, metavar='S', help='Random seed')
 parser.add_argument('--disable-cuda', action='store_true', help='Disable CUDA')
 parser.add_argument('--env', type=str, default='cheetah-run', choices=GYM_ENVS + CONTROL_SUITE_ENVS, help='Gym/Control Suite environment')
@@ -282,8 +282,8 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
       for t in pbar:
         belief, posterior_state, action, next_observation, reward, done = update_belief_and_act(args, test_envs, planner, transition_model, encoder, belief, posterior_state, action, observation.to(device=args.device), env.action_range[0], env.action_range[1])
         total_rewards += reward.numpy()
-        if not args.symbolic_env:  # Collect real vs. predicted frames for video
-          video_frames.append(make_grid(torch.cat([observation, observation_model(belief, posterior_state).cpu()], dim=3) + 0.5, nrow=5).numpy())  # Decentre
+        #if not args.symbolic_env:  # Collect real vs. predicted frames for video
+        #  video_frames.append(make_grid(torch.cat([observation, observation_model(belief, posterior_state).cpu()], dim=3) + 0.5, nrow=5).numpy())  # Decentre
         observation = next_observation
         if done.sum().item() == args.test_episodes:
           pbar.close()
@@ -294,10 +294,10 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
     metrics['test_rewards'].append(total_rewards.tolist())
     lineplot(metrics['test_episodes'], metrics['test_rewards'], 'test_rewards', results_dir)
     lineplot(np.asarray(metrics['steps'])[np.asarray(metrics['test_episodes']) - 1], metrics['test_rewards'], 'test_rewards_steps', results_dir, xaxis='step')
-    if not args.symbolic_env:
-      episode_str = str(episode).zfill(len(str(args.episodes)))
-      write_video(video_frames, 'test_episode_%s' % episode_str, results_dir)  # Lossy compression
-      save_image(torch.as_tensor(video_frames[-1]), os.path.join(results_dir, 'test_episode_%s.png' % episode_str))
+    #if not args.symbolic_env:
+    #  episode_str = str(episode).zfill(len(str(args.episodes)))
+    #  write_video(video_frames, 'test_episode_%s' % episode_str, results_dir)  # Lossy compression
+    #  save_image(torch.as_tensor(video_frames[-1]), os.path.join(results_dir, 'test_episode_%s.png' % episode_str))
     torch.save(metrics, os.path.join(results_dir, 'metrics.pth'))
 
     # Set models to train mode
