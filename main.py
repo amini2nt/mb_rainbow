@@ -19,7 +19,7 @@ import ipdb
 
 # Hyperparameters
 parser = argparse.ArgumentParser(description='PlaNet')
-parser.add_argument('--id', type=str, default='pop_trial3', help='Experiment ID')
+parser.add_argument('--id', type=str, default='trz', help='Experiment ID')
 parser.add_argument('--seed', type=int, default=1, metavar='S', help='Random seed')
 parser.add_argument('--disable-cuda', action='store_true', help='Disable CUDA')
 parser.add_argument('--env', type=str, default='cheetah-run', choices=GYM_ENVS + CONTROL_SUITE_ENVS, help='Gym/Control Suite environment')
@@ -63,8 +63,8 @@ parser.add_argument('--experience-replay', type=str, default='', metavar='ER', h
 parser.add_argument('--render', action='store_true', help='Render environment')
 # New set of hyper-parameters
 parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigma value for CEM')
-parser.add_argument('--use-policy', type=bool, default=True, help='Use a policy network')
-parser.add_argument('--planner', type=str, default='POP_MP_Planner', help='Type of planner')
+parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
+parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
 parser.add_argument('--policy-reduce', type=str, default='mean', help='policy loss reduction')
 
 args = parser.parse_args()
@@ -89,6 +89,8 @@ metrics = {'steps': [], 'episodes': [], 'train_rewards': [], 'test_episodes': []
 if args.use_policy:
   metrics['policy_loss'] = []
 
+torch.save(args, os.path.join(results_dir, 'args.pth'))
+
 
 # Initialise training environment and experience replay memory
 env = Env(args.env, args.symbolic_env, args.seed, args.max_episode_length, args.action_repeat, args.bit_depth)
@@ -108,6 +110,7 @@ elif not args.test:
       t += 1
     metrics['steps'].append(t * args.action_repeat + (0 if len(metrics['steps']) == 0 else metrics['steps'][-1]))
     metrics['episodes'].append(s)
+
 
 
 # Initialise model parameters randomly
@@ -195,7 +198,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
   # Model fitting
   
   losses = []
-  """for s in tqdm(range(args.collect_interval)):
+  for s in tqdm(range(args.collect_interval)):
     # Draw sequence chunks {(o_t, a_t, r_t+1, terminal_t+1)} ~ D uniformly at random from the dataset (including terminal flags)
     observations, actions, rewards, nonterminals = D.sample(args.batch_size, args.chunk_size)  # Transitions start at time t = 0
     # Create initial belief and state for time t = 0
@@ -208,7 +211,8 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
     reward_loss = F.mse_loss(bottle(reward_model, (beliefs, posterior_states)), rewards[:-1], reduction='none').mean(dim=(0, 1))
     kl_loss = torch.max(kl_divergence(Normal(posterior_means, posterior_std_devs), Normal(prior_means, prior_std_devs)).sum(dim=2), free_nats).mean(dim=(0, 1))  # Note that normalisation by overshooting distance and weighting by overshooting distance cancel out
     if args.use_policy:
-      policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
+      policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')#.sum(2)
+      #policy_loss = policy_loss * torch.exp(returns[1:]*0.05).clamp_(max=20)
       if args.policy_reduce == 'sum':
         policy_loss = policy_loss.sum()
       else:
@@ -245,6 +249,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
     lineplot(metrics['episodes'][-len(metrics['policy_loss']):], metrics['policy_loss'], 'policy_loss', results_dir)
 
 
+  
   # Data collection
   with torch.no_grad():
     observation, total_reward = env.reset(), 0
@@ -260,12 +265,11 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
       if done:
         pbar.close()
         break
-    
     # Update and plot train reward metrics
     metrics['steps'].append(t + metrics['steps'][-1])
     metrics['episodes'].append(episode)
     metrics['train_rewards'].append(total_reward)
-    lineplot(metrics['episodes'][-len(metrics['train_rewards']):], metrics['train_rewards'], 'train_rewards', results_dir)"""
+    lineplot(metrics['episodes'][-len(metrics['train_rewards']):], metrics['train_rewards'], 'train_rewards', results_dir)
 
   # Test model
   if episode % args.test_interval == 0:
