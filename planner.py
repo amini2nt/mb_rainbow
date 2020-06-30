@@ -6,6 +6,7 @@ from torch.nn.utils import vector_to_parameters, parameters_to_vector
 import ipdb
 
 
+
 # Model-predictive control planner with cross-entropy method and learned transition model
 class MPCPlanner(jit.ScriptModule):
   __constants__ = ['action_size', 'planning_horizon', 'optimisation_iters', 'candidates', 'top_candidates', 'min_action', 'max_action']
@@ -43,6 +44,60 @@ class MPCPlanner(jit.ScriptModule):
       action_mean, action_std_dev = best_actions.mean(dim=2, keepdim=True), best_actions.std(dim=2, unbiased=False, keepdim=True)
     # Return first action mean µ_t
     return action_mean[0].squeeze(dim=1)
+
+# Model-predictive control planner with cross-entropy method and learned transition model
+class MPPI_Planner(jit.ScriptModule):
+  __constants__ = ['action_size', 'planning_horizon', 'optimisation_iters', 'candidates', 'top_candidates', 'min_action', 'max_action', 'gamma', 'beta']
+
+  def __init__(self, action_size, planning_horizon, optimisation_iters, candidates, top_candidates, transition_model, reward_model, min_action=-inf, max_action=inf, initial_sigma=1, gamma=10, beta=0.6):
+    super().__init__()
+    self.transition_model, self.reward_model = transition_model, reward_model
+    self.action_size, self.min_action, self.max_action = action_size, min_action, max_action
+    self.initial_sigma = initial_sigma
+    self.planning_horizon = planning_horizon
+    self.optimisation_iters = optimisation_iters
+    self.candidates, self.top_candidates = candidates, top_candidates
+    self.gamma = gamma
+    self.beta = beta
+
+  @jit.script_method
+  def forward(self, belief, state):
+    B, H, Z = belief.size(0), belief.size(1), state.size(1)
+    belief, state = belief.unsqueeze(dim=1).expand(B, self.candidates, H).reshape(-1, H), state.unsqueeze(dim=1).expand(B, self.candidates, Z).reshape(-1, Z)
+    # Initialize factorized belief over action sequences q(a_t:t+H) ~ N(0, I)
+    init_mean, init_std_dev = torch.zeros(self.planning_horizon, B, 1, self.action_size, device=belief.device), torch.ones(self.planning_horizon, B, 1, self.action_size, device=belief.device) * self.initial_sigma
+    mean = torch.zeros(self.planning_horizon, B, 1, self.action_size, device=belief.device)
+    
+    for _ in range(self.optimisation_iters):
+      # Evaluate J action sequences from the current belief (over entire sequence at once, batched over particles)
+      uu = (init_mean + init_std_dev * torch.randn(self.planning_horizon, B, self.candidates, self.action_size, device=init_mean.device))#.view(self.planning_horizon, B * self.candidates, self.action_size)  # Sample actions (time x (batch x candidates) x actions)
+      N = torch.zeros(self.planning_horizon, B, self.candidates, self.action_size, device=belief.device)
+     
+      for i in range(0, self.planning_horizon):
+        N[i] += self.beta * uu[i]
+        if i > 0:
+          N[i] += (1 - self.beta) * N[i-1]    
+
+      actions = mean + N
+      actions.clamp_(min=self.min_action, max=self.max_action)  # Clip action range
+      actions = actions.view(self.planning_horizon, B * self.candidates, self.action_size)
+      # Sample next states
+      beliefs, states, _, _ = self.transition_model(state, actions, belief)
+      # Calculate expected returns (technically sum of rewards over planning horizon)
+      returns = self.reward_model(beliefs.view(-1, H), states.view(-1, Z)).view(self.planning_horizon, -1).sum(dim=0)
+      returns = returns.reshape(B, self.candidates)
+      maxv, _ = torch.max(returns, 1)
+      maxv = maxv.unsqueeze(1)
+      returns = torch.exp(self.gamma*(returns - maxv))
+      den = returns.sum(1) + 1e-8
+      returns = returns.reshape(1, B, self.candidates, 1)
+      actions = actions.view(self.planning_horizon, B, self.candidates, self.action_size)
+      weighted_actions = returns * actions
+      den = den.reshape(1, len(den), 1, 1)
+      mean = (weighted_actions/den).sum(2).unsqueeze(2)
+    return mean[0].squeeze(dim=1)
+
+
 
 
 # Model-predictive control planner with cross-entropy method and learned transition model

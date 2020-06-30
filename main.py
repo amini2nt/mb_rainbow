@@ -11,15 +11,15 @@ from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 from env import CONTROL_SUITE_ENVS, Env, GYM_ENVS, EnvBatcher
 from memory import ExperienceReplay
-from models import bottle, Encoder, ObservationModel, RewardModel, TransitionModel, PolicyNet
-from planner import MPCPlanner, POPA1Planner, POPA2Planner, POP_P_Planner, POP_MP_Planner
+from models import bottle, Encoder, ObservationModel, RewardModel, ReturnModel, TransitionModel, PolicyNet2
+from planner import MPCPlanner, POPA1Planner, POPA2Planner, POP_P_Planner, POP_MP_Planner, MPPI_Planner
 from utils import lineplot, write_video
 import ipdb
 
 
 # Hyperparameters
 parser = argparse.ArgumentParser(description='PlaNet')
-parser.add_argument('--id', type=str, default='trz', help='Experiment ID')
+parser.add_argument('--id', type=str, default='newmppi', help='Experiment ID')
 parser.add_argument('--seed', type=int, default=1, metavar='S', help='Random seed')
 parser.add_argument('--disable-cuda', action='store_true', help='Disable CUDA')
 parser.add_argument('--env', type=str, default='cheetah-run', choices=GYM_ENVS + CONTROL_SUITE_ENVS, help='Gym/Control Suite environment')
@@ -66,12 +66,15 @@ parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigm
 parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
 parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
 parser.add_argument('--policy-reduce', type=str, default='mean', help='policy loss reduction')
+parser.add_argument('--mppi-gamma', type=float, default=1.5, help='MPPI gamma')
+parser.add_argument('--mppi-beta', type=float, default=0.5, help='MPPI beta')
+
 
 args = parser.parse_args()
 args.overshooting_distance = min(args.chunk_size, args.overshooting_distance)  # Overshooting distance cannot be greater than chunk size
 print(' ' * 26 + 'Options')
 for k, v in vars(args).items():
-  print(' ' * 26 + k + ': ' + str(v))
+	print(' ' * 26 + k + ': ' + str(v))
 
 
 # Setup
@@ -80,14 +83,16 @@ os.makedirs(results_dir, exist_ok=True)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 if torch.cuda.is_available() and not args.disable_cuda:
-  args.device = torch.device('cuda')
-  torch.cuda.manual_seed(args.seed)
-  print("Using GPU...")
+	args.device = torch.device('cuda')
+	torch.cuda.manual_seed(args.seed)
+	print("Using GPU...")
 else:
-  args.device = torch.device('cpu')
-metrics = {'steps': [], 'episodes': [], 'train_rewards': [], 'test_episodes': [], 'test_rewards': [], 'observation_loss': [], 'reward_loss': [], 'kl_loss': []}
+	args.device = torch.device('cpu')
+metrics = {'steps': [], 'episodes': [], 'train_rewards': [], 'test_episodes': [], 'test_rewards': [], 
+			'observation_loss': [], 'reward_loss': [], 'kl_loss': []}
 if args.use_policy:
-  metrics['policy_loss'] = []
+	metrics['policy_loss'] = []
+	metrics['return_loss'] = []
 
 torch.save(args, os.path.join(results_dir, 'args.pth'))
 
@@ -95,21 +100,21 @@ torch.save(args, os.path.join(results_dir, 'args.pth'))
 # Initialise training environment and experience replay memory
 env = Env(args.env, args.symbolic_env, args.seed, args.max_episode_length, args.action_repeat, args.bit_depth)
 if args.experience_replay is not '' and os.path.exists(args.experience_replay):
-  D = torch.load(args.experience_replay)
-  metrics['steps'], metrics['episodes'] = [D.steps] * D.episodes, list(range(1, D.episodes + 1))
+	D = torch.load(args.experience_replay)
+	metrics['steps'], metrics['episodes'] = [D.steps] * D.episodes, list(range(1, D.episodes + 1))
 elif not args.test:
-  D = ExperienceReplay(args.experience_size, args.symbolic_env, env.observation_size, env.action_size, args.bit_depth, args.device)
-  # Initialise dataset D with S random seed episodes
-  for s in range(1, args.seed_episodes + 1):
-    observation, done, t = env.reset(), False, 0
-    while not done:
-      action = env.sample_random_action()
-      next_observation, reward, done = env.step(action)
-      D.append(observation, action, reward, done)
-      observation = next_observation
-      t += 1
-    metrics['steps'].append(t * args.action_repeat + (0 if len(metrics['steps']) == 0 else metrics['steps'][-1]))
-    metrics['episodes'].append(s)
+	D = ExperienceReplay(args.experience_size, args.symbolic_env, env.observation_size, env.action_size, args.bit_depth, args.device)
+	# Initialise dataset D with S random seed episodes
+	for s in range(1, args.seed_episodes + 1):
+		observation, done, t = env.reset(), False, 0
+		while not done:
+			action = env.sample_random_action()
+			next_observation, reward, done = env.step(action)
+			D.append(observation, action, reward, done)
+			observation = next_observation
+			t += 1
+		metrics['steps'].append(t * args.action_repeat + (0 if len(metrics['steps']) == 0 else metrics['steps'][-1]))
+		metrics['episodes'].append(s)
 
 
 
@@ -121,35 +126,40 @@ encoder = Encoder(args.symbolic_env, env.observation_size, args.embedding_size, 
 param_list = list(transition_model.parameters()) + list(observation_model.parameters()) + list(reward_model.parameters()) + list(encoder.parameters())
 
 if args.use_policy:
-  policy_net = PolicyNet(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
-  param_list += list(policy_net.parameters())
+	policy_net = PolicyNet2(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
+	param_list += list(policy_net.parameters())
+	return_model = ReturnModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
+	param_list += list(return_model.parameters())
 
 optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
 
 if args.models is not '' and os.path.exists(args.models):
-  model_dicts = torch.load(args.models)
-  transition_model.load_state_dict(model_dicts['transition_model'])
-  observation_model.load_state_dict(model_dicts['observation_model'])
-  reward_model.load_state_dict(model_dicts['reward_model'])
-  encoder.load_state_dict(model_dicts['encoder'])
-  if args.use_policy:
-    policy_net.load_state_dict(model_dicts['policy_net'])
-  optimiser.load_state_dict(model_dicts['optimiser'])
+	model_dicts = torch.load(args.models)
+	transition_model.load_state_dict(model_dicts['transition_model'])
+	observation_model.load_state_dict(model_dicts['observation_model'])
+	reward_model.load_state_dict(model_dicts['reward_model'])
+	encoder.load_state_dict(model_dicts['encoder'])
+	if args.use_policy:
+		policy_net.load_state_dict(model_dicts['policy_net'])
+		return_model.load_state_dict(model_dicts['return_model'])
+	optimiser.load_state_dict(model_dicts['optimiser'])
 
 if args.planner == "CEM":
-  planner = MPCPlanner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, env.action_range[0], env.action_range[1], args.initial_sigma)
+	planner = MPCPlanner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, env.action_range[0], env.action_range[1], args.initial_sigma)
 elif args.planner == "POPA1Planner":
-  assert(args.use_policy == True)
-  planner = POPA1Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
+	assert(args.use_policy == True)
+	planner = POPA1Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
 elif args.planner == "POPA2Planner":
-  assert(args.use_policy == True)
-  planner = POPA2Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
+	assert(args.use_policy == True)
+	planner = POPA2Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
 elif args.planner == "POP_P_Planner":
-  assert(args.use_policy == True)
-  planner = POP_P_Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
+	assert(args.use_policy == True)
+	planner = POP_P_Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
 elif args.planner == "POP_MP_Planner":
-  assert(args.use_policy == True)
-  planner = POP_MP_Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
+	assert(args.use_policy == True)
+	planner = POP_MP_Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
+elif args.planner == "MPPI_Planner":
+	planner = MPPI_Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, env.action_range[0], env.action_range[1], args.initial_sigma, args.mppi_gamma, args.mppi_beta)
 
 
 global_prior = Normal(torch.zeros(args.batch_size, args.state_size, device=args.device), torch.ones(args.batch_size, args.state_size, device=args.device))  # Global prior N(0, I)
@@ -157,176 +167,186 @@ free_nats = torch.full((1, ), args.free_nats, dtype=torch.float32, device=args.d
 
 
 def update_belief_and_act(args, env, planner, transition_model, encoder, belief, posterior_state, action, observation, min_action=-inf, max_action=inf, explore=False):
-  # Infer belief over current state q(s_t|o≤t,a<t) from the history
-  belief, _, _, _, posterior_state, _, _ = transition_model(posterior_state, action.unsqueeze(dim=0), belief, encoder(observation).unsqueeze(dim=0))  # Action and observation need extra time dimension
-  belief, posterior_state = belief.squeeze(dim=0), posterior_state.squeeze(dim=0)  # Remove time dimension from belief/state
-  action = planner(belief, posterior_state)  # Get action from planner(q(s_t|o≤t,a<t), p)
-  if explore:
-    action = action + args.action_noise * torch.randn_like(action)  # Add exploration noise ε ~ p(ε) to the action
-  action.clamp_(min=min_action, max=max_action)  # Clip action range
-  next_observation, reward, done = env.step(action.cpu() if isinstance(env, EnvBatcher) else action[0].cpu())  # Perform environment step (action repeats handled internally)
-  return belief, posterior_state, action, next_observation, reward, done
+	# Infer belief over current state q(s_t|o≤t,a<t) from the history
+	belief, _, _, _, posterior_state, _, _ = transition_model(posterior_state, action.unsqueeze(dim=0), belief, encoder(observation).unsqueeze(dim=0))  # Action and observation need extra time dimension
+	belief, posterior_state = belief.squeeze(dim=0), posterior_state.squeeze(dim=0)  # Remove time dimension from belief/state
+	action = planner(belief, posterior_state)  # Get action from planner(q(s_t|o≤t,a<t), p)
+	if explore:
+		action = action + args.action_noise * torch.randn_like(action)  # Add exploration noise ε ~ p(ε) to the action
+	action.clamp_(min=min_action, max=max_action)  # Clip action range
+	next_observation, reward, done = env.step(action.cpu() if isinstance(env, EnvBatcher) else action[0].cpu())  # Perform environment step (action repeats handled internally)
+	return belief, posterior_state, action, next_observation, reward, done
 
 
 # Testing only
 if args.test:
-  # Set models to eval mode
-  transition_model.eval()
-  reward_model.eval()
-  encoder.eval()
-  with torch.no_grad():
-    total_reward = 0
-    for _ in tqdm(range(args.test_episodes)):
-      observation = env.reset()
-      belief, posterior_state, action = torch.zeros(1, args.belief_size, device=args.device), torch.zeros(1, args.state_size, device=args.device), torch.zeros(1, env.action_size, device=args.device)
-      pbar = tqdm(range(args.max_episode_length // args.action_repeat))
-      for t in pbar:
-        belief, posterior_state, action, observation, reward, done = update_belief_and_act(args, env, planner, transition_model, encoder, belief, posterior_state, action, observation.to(device=args.device), env.action_range[0], env.action_range[1])
-        total_reward += reward
-        if args.render:
-          env.render()
-        if done:
-          pbar.close()
-          break
-  print('Average Reward:', total_reward / args.test_episodes)
-  env.close()
-  quit()
+	# Set models to eval mode
+	transition_model.eval()
+	reward_model.eval()
+	encoder.eval()
+	with torch.no_grad():
+		total_reward = 0
+		for _ in tqdm(range(args.test_episodes)):
+			observation = env.reset()
+			belief, posterior_state, action = torch.zeros(1, args.belief_size, device=args.device), torch.zeros(1, args.state_size, device=args.device), torch.zeros(1, env.action_size, device=args.device)
+			pbar = tqdm(range(args.max_episode_length // args.action_repeat))
+			for t in pbar:
+				belief, posterior_state, action, observation, reward, done = update_belief_and_act(args, env, planner, transition_model, encoder, belief, posterior_state, action, observation.to(device=args.device), env.action_range[0], env.action_range[1])
+				total_reward += reward
+				if args.render:
+					env.render()
+				if done:
+					pbar.close()
+					break
+	print('Average Reward:', total_reward / args.test_episodes)
+	env.close()
+	quit()
 
 
 # Training (and testing)
 for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total=args.episodes, initial=metrics['episodes'][-1] + 1):
-  # Model fitting
-  
-  losses = []
-  for s in tqdm(range(args.collect_interval)):
-    # Draw sequence chunks {(o_t, a_t, r_t+1, terminal_t+1)} ~ D uniformly at random from the dataset (including terminal flags)
-    observations, actions, rewards, nonterminals = D.sample(args.batch_size, args.chunk_size)  # Transitions start at time t = 0
-    # Create initial belief and state for time t = 0
-    init_belief, init_state = torch.zeros(args.batch_size, args.belief_size, device=args.device), torch.zeros(args.batch_size, args.state_size, device=args.device)
-    encoded_obs = bottle(encoder, (observations, ))
-    # Update belief/state using posterior from previous belief/state, previous action and current observation (over entire sequence at once)
-    beliefs, prior_states, prior_means, prior_std_devs, posterior_states, posterior_means, posterior_std_devs = transition_model(init_state, actions[:-1], init_belief, encoded_obs[1:], nonterminals[:-1])
-    # Calculate observation likelihood, reward likelihood and KL losses (for t = 0 only for latent overshooting); sum over final dims, average over batch and time (original implementation, though paper seems to miss 1/T scaling?)
-    observation_loss = F.mse_loss(bottle(observation_model, (beliefs, posterior_states)), observations[1:], reduction='none').sum(dim=2 if args.symbolic_env else (2, 3, 4)).mean(dim=(0, 1))
-    reward_loss = F.mse_loss(bottle(reward_model, (beliefs, posterior_states)), rewards[:-1], reduction='none').mean(dim=(0, 1))
-    kl_loss = torch.max(kl_divergence(Normal(posterior_means, posterior_std_devs), Normal(prior_means, prior_std_devs)).sum(dim=2), free_nats).mean(dim=(0, 1))  # Note that normalisation by overshooting distance and weighting by overshooting distance cancel out
-    if args.use_policy:
-      policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')#.sum(2)
-      #policy_loss = policy_loss * torch.exp(returns[1:]*0.05).clamp_(max=20)
-      if args.policy_reduce == 'sum':
-        policy_loss = policy_loss.sum()
-      else:
-        policy_loss = policy_loss.mean()
+	# Model fitting
+	
+	losses = []
+	for s in tqdm(range(args.collect_interval)):
+		# Draw sequence chunks {(o_t, a_t, r_t+1, terminal_t+1)} ~ D uniformly at random from the dataset (including terminal flags)
+		observations, actions, rewards, nonterminals = D.sample(args.batch_size, args.chunk_size)  # Transitions start at time t = 0
+		# Create initial belief and state for time t = 0
+		init_belief, init_state = torch.zeros(args.batch_size, args.belief_size, device=args.device), torch.zeros(args.batch_size, args.state_size, device=args.device)
+		encoded_obs = bottle(encoder, (observations, ))
+		# Update belief/state using posterior from previous belief/state, previous action and current observation (over entire sequence at once)
+		beliefs, prior_states, prior_means, prior_std_devs, posterior_states, posterior_means, posterior_std_devs = transition_model(init_state, actions[:-1], init_belief, encoded_obs[1:], nonterminals[:-1])
+		# Calculate observation likelihood, reward likelihood and KL losses (for t = 0 only for latent overshooting); sum over final dims, average over batch and time (original implementation, though paper seems to miss 1/T scaling?)
+		observation_loss = F.mse_loss(bottle(observation_model, (beliefs, posterior_states)), observations[1:], reduction='none').sum(dim=2 if args.symbolic_env else (2, 3, 4)).mean(dim=(0, 1))
+		reward_loss = F.mse_loss(bottle(reward_model, (beliefs, posterior_states)), rewards[:-1], reduction='none').mean(dim=(0, 1))
+		kl_loss = torch.max(kl_divergence(Normal(posterior_means, posterior_std_devs), Normal(prior_means, prior_std_devs)).sum(dim=2), free_nats).mean(dim=(0, 1))  # Note that normalisation by overshooting distance and weighting by overshooting distance cancel out
+		if args.use_policy:
+			pred_return = bottle(return_model, (beliefs, posterior_states))
+			return_loss = F.mse_loss(pred_return, returns[1:], reduction='none').mean(dim=(0, 1))
+			#policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')#.sum(2)
+			policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:])).sum(2)
+			policy_loss = policy_loss * torch.exp((returns[1:]-pred_return.detach())*0.05).clamp_(max=20)
+			if args.policy_reduce == 'sum':
+				policy_loss = policy_loss.sum()
+			else:
+				policy_loss = policy_loss.mean()
 
-    # Apply linearly ramping learning rate schedule
-    if args.learning_rate_schedule != 0:
-      for group in optimiser.param_groups:
-        group['lr'] = min(group['lr'] + args.learning_rate / args.learning_rate_schedule, args.learning_rate)
-    # Update model parameters
-    optimiser.zero_grad()
-    total_loss = observation_loss + reward_loss + kl_loss
-    if args.use_policy:
-      total_loss += policy_loss 
-    total_loss.backward()
-    nn.utils.clip_grad_norm_(param_list, args.grad_clip_norm, norm_type=2)
-    optimiser.step()
-    # Store (0) observation loss (1) reward loss (2) KL loss
-    losses.append([observation_loss.item(), reward_loss.item(), kl_loss.item()])
-    if args.use_policy:
-      losses[-1].append(policy_loss.item())
-
-
-  # Update and plot loss metrics
-  losses = tuple(zip(*losses))
-  metrics['observation_loss'].append(losses[0])
-  metrics['reward_loss'].append(losses[1])
-  metrics['kl_loss'].append(losses[2])
-  lineplot(metrics['episodes'][-len(metrics['observation_loss']):], metrics['observation_loss'], 'observation_loss', results_dir)
-  lineplot(metrics['episodes'][-len(metrics['reward_loss']):], metrics['reward_loss'], 'reward_loss', results_dir)
-  lineplot(metrics['episodes'][-len(metrics['kl_loss']):], metrics['kl_loss'], 'kl_loss', results_dir)
-  if args.use_policy:
-    metrics['policy_loss'].append(losses[3])
-    lineplot(metrics['episodes'][-len(metrics['policy_loss']):], metrics['policy_loss'], 'policy_loss', results_dir)
+		# Apply linearly ramping learning rate schedule
+		if args.learning_rate_schedule != 0:
+			for group in optimiser.param_groups:
+				group['lr'] = min(group['lr'] + args.learning_rate / args.learning_rate_schedule, args.learning_rate)
+		# Update model parameters
+		optimiser.zero_grad()
+		total_loss = observation_loss + reward_loss + kl_loss
+		if args.use_policy:
+			total_loss += policy_loss + return_loss
+		total_loss.backward()
+		nn.utils.clip_grad_norm_(param_list, args.grad_clip_norm, norm_type=2)
+		optimiser.step()
+		# Store (0) observation loss (1) reward loss (2) KL loss
+		losses.append([observation_loss.item(), reward_loss.item(), kl_loss.item()])
+		if args.use_policy:
+			losses[-1].append(policy_loss.item())
+			losses[-1].append(return_loss.item())
 
 
-  
-  # Data collection
-  with torch.no_grad():
-    observation, total_reward = env.reset(), 0
-    belief, posterior_state, action = torch.zeros(1, args.belief_size, device=args.device), torch.zeros(1, args.state_size, device=args.device), torch.zeros(1, env.action_size, device=args.device)
-    pbar = tqdm(range(args.max_episode_length // args.action_repeat))
-    for t in pbar:
-      belief, posterior_state, action, next_observation, reward, done = update_belief_and_act(args, env, planner, transition_model, encoder, belief, posterior_state, action, observation.to(device=args.device), env.action_range[0], env.action_range[1], explore=True)
-      D.append(observation, action.cpu(), reward, done)
-      total_reward += reward
-      observation = next_observation
-      if args.render:
-        env.render()
-      if done:
-        pbar.close()
-        break
-    # Update and plot train reward metrics
-    metrics['steps'].append(t + metrics['steps'][-1])
-    metrics['episodes'].append(episode)
-    metrics['train_rewards'].append(total_reward)
-    lineplot(metrics['episodes'][-len(metrics['train_rewards']):], metrics['train_rewards'], 'train_rewards', results_dir)
-
-  # Test model
-  if episode % args.test_interval == 0:
-    # Set models to eval mode
-    transition_model.eval()
-    observation_model.eval()
-    reward_model.eval()
-    encoder.eval()
-    if args.use_policy:
-      policy_net.eval()
-    # Initialise parallelised test environments
-    test_envs = EnvBatcher(Env, (args.env, args.symbolic_env, args.seed, args.max_episode_length, args.action_repeat, args.bit_depth), {}, args.test_episodes)
-    
-    with torch.no_grad():
-      observation, total_rewards, video_frames = test_envs.reset(), np.zeros((args.test_episodes, )), []
-      belief, posterior_state, action = torch.zeros(args.test_episodes, args.belief_size, device=args.device), torch.zeros(args.test_episodes, args.state_size, device=args.device), torch.zeros(args.test_episodes, env.action_size, device=args.device)
-      pbar = tqdm(range(args.max_episode_length // args.action_repeat))
-      for t in pbar:
-        belief, posterior_state, action, next_observation, reward, done = update_belief_and_act(args, test_envs, planner, transition_model, encoder, belief, posterior_state, action, observation.to(device=args.device), env.action_range[0], env.action_range[1])
-        total_rewards += reward.numpy()
-        #if not args.symbolic_env:  # Collect real vs. predicted frames for video
-        #  video_frames.append(make_grid(torch.cat([observation, observation_model(belief, posterior_state).cpu()], dim=3) + 0.5, nrow=5).numpy())  # Decentre
-        observation = next_observation
-        if done.sum().item() == args.test_episodes:
-          pbar.close()
-          break
-    
-    # Update and plot reward metrics (and write video if applicable) and save metrics
-    metrics['test_episodes'].append(episode)
-    metrics['test_rewards'].append(total_rewards.tolist())
-    lineplot(metrics['test_episodes'], metrics['test_rewards'], 'test_rewards', results_dir)
-    lineplot(np.asarray(metrics['steps'])[np.asarray(metrics['test_episodes']) - 1], metrics['test_rewards'], 'test_rewards_steps', results_dir, xaxis='step')
-    #if not args.symbolic_env:
-    #  episode_str = str(episode).zfill(len(str(args.episodes)))
-    #  write_video(video_frames, 'test_episode_%s' % episode_str, results_dir)  # Lossy compression
-    #  save_image(torch.as_tensor(video_frames[-1]), os.path.join(results_dir, 'test_episode_%s.png' % episode_str))
-    torch.save(metrics, os.path.join(results_dir, 'metrics.pth'))
-
-    # Set models to train mode
-    transition_model.train()
-    observation_model.train()
-    reward_model.train()
-    encoder.train()
-    if args.use_policy:
-      policy_net.train()
-    # Close test environments
-    test_envs.close()
+	# Update and plot loss metrics
+	losses = tuple(zip(*losses))
+	metrics['observation_loss'].append(losses[0])
+	metrics['reward_loss'].append(losses[1])
+	metrics['kl_loss'].append(losses[2])
+	lineplot(metrics['episodes'][-len(metrics['observation_loss']):], metrics['observation_loss'], 'observation_loss', results_dir)
+	lineplot(metrics['episodes'][-len(metrics['reward_loss']):], metrics['reward_loss'], 'reward_loss', results_dir)
+	lineplot(metrics['episodes'][-len(metrics['kl_loss']):], metrics['kl_loss'], 'kl_loss', results_dir)
+	if args.use_policy:
+		metrics['policy_loss'].append(losses[3])
+		lineplot(metrics['episodes'][-len(metrics['policy_loss']):], metrics['policy_loss'], 'policy_loss', results_dir)
+		metrics['return_loss'].append(losses[4])
+		lineplot(metrics['episodes'][-len(metrics['return_loss']):], metrics['return_loss'], 'return_loss', results_dir)
 
 
-  # Checkpoint models
-  if episode % args.checkpoint_interval == 0:
-    saver = {'transition_model': transition_model.state_dict(), 'observation_model': observation_model.state_dict(), 'reward_model': reward_model.state_dict(), 'encoder': encoder.state_dict(), 'optimiser': optimiser.state_dict()} 
-    if args.use_policy:
-      saver['policy_net'] = policy_net.state_dict(),
-    torch.save(saver, os.path.join(results_dir, 'models_%d.pth' % episode))
-    if args.checkpoint_experience:
-      torch.save(D, os.path.join(results_dir, 'experience.pth'))  # Warning: will fail with MemoryError with large memory sizes
+
+
+	
+	# Data collection
+	with torch.no_grad():
+		observation, total_reward = env.reset(), 0
+		belief, posterior_state, action = torch.zeros(1, args.belief_size, device=args.device), torch.zeros(1, args.state_size, device=args.device), torch.zeros(1, env.action_size, device=args.device)
+		pbar = tqdm(range(args.max_episode_length // args.action_repeat))
+		for t in pbar:
+			belief, posterior_state, action, next_observation, reward, done = update_belief_and_act(args, env, planner, transition_model, encoder, belief, posterior_state, action, observation.to(device=args.device), env.action_range[0], env.action_range[1], explore=True)
+			D.append(observation, action.cpu(), reward, done)
+			total_reward += reward
+			observation = next_observation
+			if args.render:
+				env.render()
+			if done:
+				pbar.close()
+				break
+		# Update and plot train reward metrics
+		metrics['steps'].append(t + metrics['steps'][-1])
+		metrics['episodes'].append(episode)
+		metrics['train_rewards'].append(total_reward)
+		lineplot(metrics['episodes'][-len(metrics['train_rewards']):], metrics['train_rewards'], 'train_rewards', results_dir)
+
+	# Test model
+	if episode % args.test_interval == 0:
+		# Set models to eval mode
+		transition_model.eval()
+		observation_model.eval()
+		reward_model.eval()
+		encoder.eval()
+		if args.use_policy:
+			policy_net.eval()
+			return_model.eval()
+		# Initialise parallelised test environments
+		test_envs = EnvBatcher(Env, (args.env, args.symbolic_env, args.seed, args.max_episode_length, args.action_repeat, args.bit_depth), {}, args.test_episodes)
+		
+		with torch.no_grad():
+			observation, total_rewards, video_frames = test_envs.reset(), np.zeros((args.test_episodes, )), []
+			belief, posterior_state, action = torch.zeros(args.test_episodes, args.belief_size, device=args.device), torch.zeros(args.test_episodes, args.state_size, device=args.device), torch.zeros(args.test_episodes, env.action_size, device=args.device)
+			pbar = tqdm(range(args.max_episode_length // args.action_repeat))
+			for t in pbar:
+				belief, posterior_state, action, next_observation, reward, done = update_belief_and_act(args, test_envs, planner, transition_model, encoder, belief, posterior_state, action, observation.to(device=args.device), env.action_range[0], env.action_range[1])
+				total_rewards += reward.numpy()
+				#if not args.symbolic_env:  # Collect real vs. predicted frames for video
+				#  video_frames.append(make_grid(torch.cat([observation, observation_model(belief, posterior_state).cpu()], dim=3) + 0.5, nrow=5).numpy())  # Decentre
+				observation = next_observation
+				if done.sum().item() == args.test_episodes:
+					pbar.close()
+					break
+		
+		# Update and plot reward metrics (and write video if applicable) and save metrics
+		metrics['test_episodes'].append(episode)
+		metrics['test_rewards'].append(total_rewards.tolist())
+		lineplot(metrics['test_episodes'], metrics['test_rewards'], 'test_rewards', results_dir)
+		lineplot(np.asarray(metrics['steps'])[np.asarray(metrics['test_episodes']) - 1], metrics['test_rewards'], 'test_rewards_steps', results_dir, xaxis='step')
+		#if not args.symbolic_env:
+		#  episode_str = str(episode).zfill(len(str(args.episodes)))
+		#  write_video(video_frames, 'test_episode_%s' % episode_str, results_dir)  # Lossy compression
+		#  save_image(torch.as_tensor(video_frames[-1]), os.path.join(results_dir, 'test_episode_%s.png' % episode_str))
+		torch.save(metrics, os.path.join(results_dir, 'metrics.pth'))
+
+		# Set models to train mode
+		transition_model.train()
+		observation_model.train()
+		reward_model.train()
+		encoder.train()
+		if args.use_policy:
+			policy_net.train()
+			return_model.train()
+		# Close test environments
+		test_envs.close()
+
+
+	# Checkpoint models
+	if episode % args.checkpoint_interval == 0:
+		saver = {'transition_model': transition_model.state_dict(), 'observation_model': observation_model.state_dict(), 'reward_model': reward_model.state_dict(), 'encoder': encoder.state_dict(), 'optimiser': optimiser.state_dict()} 
+		if args.use_policy:
+			saver['policy_net'] = policy_net.state_dict(),
+		torch.save(saver, os.path.join(results_dir, 'models_%d.pth' % episode))
+		if args.checkpoint_experience:
+			torch.save(D, os.path.join(results_dir, 'experience.pth'))  # Warning: will fail with MemoryError with large memory sizes
 
 
 # Close training environment
