@@ -134,6 +134,7 @@ class RewardModel(jit.ScriptModule):
     reward = self.fc3(hidden).squeeze(dim=1)
     return reward
 
+
 class ReturnModel(jit.ScriptModule):
   def __init__(self, belief_size, state_size, hidden_size, activation_function='relu'):
     super().__init__()
@@ -188,7 +189,7 @@ class PolicyNet(jit.ScriptModule):
 
 
 
-class PolicyNet2(jit.ScriptModule):
+class StochPolicyNet(jit.ScriptModule):
   def __init__(self, belief_size, state_size, hidden_size, action_size, activation_function='relu'):
     super().__init__()
     self.act_fn = getattr(F, activation_function)
@@ -304,51 +305,4 @@ def Encoder(symbolic, observation_size, embedding_size, activation_function='rel
     return SymbolicEncoder(observation_size, embedding_size, activation_function)
   else:
     return VisualEncoder(embedding_size, activation_function)
-
-
-from torch.distributions import Normal
-
-class ActionModel(jit.ScriptModule):
-    """
-    Action model to compute action from state and rnn_hidden
-    """
-    def __init__(self, state_dim, rnn_hidden_dim, action_dim,
-                 hidden_dim=400, act=F.elu, min_stddev=1e-4, init_stddev=5.0):
-        super(ActionModel, self).__init__()
-        self.fc1 = nn.Linear(state_dim + rnn_hidden_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc_mean = nn.Linear(hidden_dim, action_dim)
-        self.fc_stddev = nn.Linear(hidden_dim, action_dim)
-        self.act = act
-        self.min_stddev = min_stddev
-        self.init_stddev = np.log(np.exp(init_stddev) - 1)
-
-    @jit.script_method
-    def forward(self, state, rnn_hidden):
-        """
-        if training=True, returned action is reparametrized sample
-        if training=False, returned action is mean of action distribution
-        """
-        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=1)))
-        hidden = self.act(self.fc2(hidden))
-        hidden = self.act(self.fc3(hidden))
-        hidden = self.act(self.fc4(hidden))
-
-        # action-mean is divided by 5.0 and applied tanh
-        # and multiplied by 5.0 same as Dreamer's paper
-        mean = self.fc_mean(hidden)
-        mean = 5.0 * torch.tanh(mean / 5.0)
-
-        # stddev is computed with some hyperparameter
-        # (init_stddev, min_stddev) same as original implementation
-        stddev = self.fc_stddev(hidden)
-        stddev = F.softplus(stddev + self.init_stddev) + self.min_stddev
-
-        if self.training:
-            action = torch.tanh(mean + stddev * torch.randn_like(mean))
-        else:
-            action = torch.tanh(mean)
-        return action
 

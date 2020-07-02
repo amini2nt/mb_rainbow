@@ -11,8 +11,8 @@ from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 from env import CONTROL_SUITE_ENVS, Env, GYM_ENVS, EnvBatcher
 from memory import ExperienceReplay
-from models import bottle, Encoder, ObservationModel, RewardModel, ReturnModel, TransitionModel, PolicyNet2
-from planner import MPCPlanner, POPA1Planner, POPA2Planner, POP_P_Planner, POP_MP_Planner, MPPI_Planner
+from models import bottle, Encoder, ObservationModel, RewardModel, ReturnModel, TransitionModel, PolicyNet, StochPolicyNet
+from planner import MPCPlanner, POPA1Planner, POPA2Planner, POP_P_Planner, MPPI_Planner
 from utils import lineplot, write_video
 import ipdb
 
@@ -64,6 +64,8 @@ parser.add_argument('--render', action='store_true', help='Render environment')
 # New set of hyper-parameters
 parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigma value for CEM')
 parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
+parser.add_argument('--stoch-policy', type=bool, default=False, help='Use a stochastic policy')
+parser.add_argument('--use-value', type=bool, default=False, help='Use a value network')
 parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
 parser.add_argument('--policy-reduce', type=str, default='mean', help='policy loss reduction')
 parser.add_argument('--mppi-gamma', type=float, default=1.5, help='MPPI gamma')
@@ -92,7 +94,8 @@ metrics = {'steps': [], 'episodes': [], 'train_rewards': [], 'test_episodes': []
 			'observation_loss': [], 'reward_loss': [], 'kl_loss': []}
 if args.use_policy:
 	metrics['policy_loss'] = []
-	metrics['return_loss'] = []
+if args.use_value:
+	metrics['value_loss'] = []
 
 torch.save(args, os.path.join(results_dir, 'args.pth'))
 
@@ -124,14 +127,19 @@ observation_model = ObservationModel(args.symbolic_env, env.observation_size, ar
 reward_model = RewardModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
 encoder = Encoder(args.symbolic_env, env.observation_size, args.embedding_size, args.activation_function).to(device=args.device)
 param_list = list(transition_model.parameters()) + list(observation_model.parameters()) + list(reward_model.parameters()) + list(encoder.parameters())
+optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
 
 if args.use_policy:
-	policy_net = PolicyNet2(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
-	param_list += list(policy_net.parameters())
-	return_model = ReturnModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
-	param_list += list(return_model.parameters())
+	if args.stoch_policy:
+		policy_net = StochPolicyNet(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
+	else:
+		policy_net = PolicyNet(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
+	policy_optimizer = optim.Adam(policy_net.parameters(), lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)	
 
-optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
+if args.use_value:
+	value_net = ReturnModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
+	value_optimizer = optim.Adam(value_net.parameters(), lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
+
 
 if args.models is not '' and os.path.exists(args.models):
 	model_dicts = torch.load(args.models)
@@ -139,10 +147,13 @@ if args.models is not '' and os.path.exists(args.models):
 	observation_model.load_state_dict(model_dicts['observation_model'])
 	reward_model.load_state_dict(model_dicts['reward_model'])
 	encoder.load_state_dict(model_dicts['encoder'])
+	optimiser.load_state_dict(model_dicts['optimiser'])
 	if args.use_policy:
 		policy_net.load_state_dict(model_dicts['policy_net'])
-		return_model.load_state_dict(model_dicts['return_model'])
-	optimiser.load_state_dict(model_dicts['optimiser'])
+		policy_optimizer.load_state_dict(model_dicts['policy_optimizer'])
+	if args.use_value:
+		value_net.load_state_dict(model_dicts['value_net'])
+		value_optimizer.load_state_dict(model_dicts['value_optimizer'])
 
 if args.planner == "CEM":
 	planner = MPCPlanner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, env.action_range[0], env.action_range[1], args.initial_sigma)
@@ -220,35 +231,52 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 		observation_loss = F.mse_loss(bottle(observation_model, (beliefs, posterior_states)), observations[1:], reduction='none').sum(dim=2 if args.symbolic_env else (2, 3, 4)).mean(dim=(0, 1))
 		reward_loss = F.mse_loss(bottle(reward_model, (beliefs, posterior_states)), rewards[:-1], reduction='none').mean(dim=(0, 1))
 		kl_loss = torch.max(kl_divergence(Normal(posterior_means, posterior_std_devs), Normal(prior_means, prior_std_devs)).sum(dim=2), free_nats).mean(dim=(0, 1))  # Note that normalisation by overshooting distance and weighting by overshooting distance cancel out
-		if args.use_policy:
-			pred_return = bottle(return_model, (beliefs, posterior_states))
-			return_loss = F.mse_loss(pred_return, returns[1:], reduction='none').mean(dim=(0, 1))
-			#policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')#.sum(2)
-			policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:])).sum(2)
-			policy_loss = policy_loss * torch.exp((returns[1:]-pred_return.detach())*0.05).clamp_(max=20)
-			if args.policy_reduce == 'sum':
-				policy_loss = policy_loss.sum()
-			else:
-				policy_loss = policy_loss.mean()
-
+		
 		# Apply linearly ramping learning rate schedule
 		if args.learning_rate_schedule != 0:
 			for group in optimiser.param_groups:
 				group['lr'] = min(group['lr'] + args.learning_rate / args.learning_rate_schedule, args.learning_rate)
 		# Update model parameters
+		
 		optimiser.zero_grad()
 		total_loss = observation_loss + reward_loss + kl_loss
-		if args.use_policy:
-			total_loss += policy_loss + return_loss
 		total_loss.backward()
 		nn.utils.clip_grad_norm_(param_list, args.grad_clip_norm, norm_type=2)
 		optimiser.step()
 		# Store (0) observation loss (1) reward loss (2) KL loss
 		losses.append([observation_loss.item(), reward_loss.item(), kl_loss.item()])
-		if args.use_policy:
-			losses[-1].append(policy_loss.item())
+		
+		if args.use_value:
+			beliefs = beliefs.detach()
+			posterior_states = posterior_states.detach()
+			pred_return = bottle(value_net, (beliefs, posterior_states))
+			return_loss = F.mse_loss(pred_return, returns[1:], reduction='none').mean(dim=(0, 1))
+			value_optimizer.zero_grad()
+			total_loss = return_loss
+			total_loss.backward()
+			nn.utils.clip_grad_norm_(value_net.parameters(), args.grad_clip_norm, norm_type=2)
+			value_optimiser.step()
 			losses[-1].append(return_loss.item())
 
+		if args.use_policy:
+			beliefs = beliefs.detach()
+			posterior_states = posterior_states.detach()
+			if not args.stoch_policy:
+				policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
+			else:
+				pred_return = bottle(value_net, (beliefs, posterior_states))
+				policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:])).sum(2)
+				policy_loss = policy_loss * torch.exp((returns[1:]-pred_return.detach())*0.05).clamp_(max=20)
+			if args.policy_reduce == 'sum':
+				policy_loss = policy_loss.sum()
+			else:
+				policy_loss = policy_loss.mean()
+			policy_optimizer.zero_grad()
+			total_loss = policy_loss
+			total_loss.backward()
+			nn.utils.clip_grad_norm_(policy_net.parameters(), args.grad_clip_norm, norm_type=2)
+			policy_optimizer.step()
+			losses[-1].append(policy_loss.item())
 
 	# Update and plot loss metrics
 	losses = tuple(zip(*losses))
@@ -258,15 +286,13 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 	lineplot(metrics['episodes'][-len(metrics['observation_loss']):], metrics['observation_loss'], 'observation_loss', results_dir)
 	lineplot(metrics['episodes'][-len(metrics['reward_loss']):], metrics['reward_loss'], 'reward_loss', results_dir)
 	lineplot(metrics['episodes'][-len(metrics['kl_loss']):], metrics['kl_loss'], 'kl_loss', results_dir)
+	if args.use_value:
+		metrics['value_loss'].append(losses[3])
+		lineplot(metrics['episodes'][-len(metrics['value_loss']):], metrics['value_loss'], 'value_loss', results_dir)
 	if args.use_policy:
-		metrics['policy_loss'].append(losses[3])
+		metrics['policy_loss'].append(losses[-1])
 		lineplot(metrics['episodes'][-len(metrics['policy_loss']):], metrics['policy_loss'], 'policy_loss', results_dir)
-		metrics['return_loss'].append(losses[4])
-		lineplot(metrics['episodes'][-len(metrics['return_loss']):], metrics['return_loss'], 'return_loss', results_dir)
-
-
-
-
+		
 	
 	# Data collection
 	with torch.no_grad():
@@ -298,7 +324,8 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 		encoder.eval()
 		if args.use_policy:
 			policy_net.eval()
-			return_model.eval()
+		if args.use_value:
+			value_net.eval()
 		# Initialise parallelised test environments
 		test_envs = EnvBatcher(Env, (args.env, args.symbolic_env, args.seed, args.max_episode_length, args.action_repeat, args.bit_depth), {}, args.test_episodes)
 		
@@ -334,7 +361,8 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 		encoder.train()
 		if args.use_policy:
 			policy_net.train()
-			return_model.train()
+		if args.use_value:
+			value_net.train()
 		# Close test environments
 		test_envs.close()
 
@@ -343,7 +371,11 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 	if episode % args.checkpoint_interval == 0:
 		saver = {'transition_model': transition_model.state_dict(), 'observation_model': observation_model.state_dict(), 'reward_model': reward_model.state_dict(), 'encoder': encoder.state_dict(), 'optimiser': optimiser.state_dict()} 
 		if args.use_policy:
-			saver['policy_net'] = policy_net.state_dict(),
+			saver['policy_net'] = policy_net.state_dict()
+			saver['policy_optimizer'] = policy_optimizer.state_dict()
+		if args.use_value:
+			saver['value_net'] = value_net.state_dict()
+			saver['value_optimizer'] = value_optimizer.state_dict()
 		torch.save(saver, os.path.join(results_dir, 'models_%d.pth' % episode))
 		if args.checkpoint_experience:
 			torch.save(D, os.path.join(results_dir, 'experience.pth'))  # Warning: will fail with MemoryError with large memory sizes
