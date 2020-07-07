@@ -12,14 +12,14 @@ from tqdm import tqdm
 from env import CONTROL_SUITE_ENVS, Env, GYM_ENVS, EnvBatcher
 from memory import ExperienceReplay
 from models import bottle, Encoder, ObservationModel, RewardModel, ReturnModel, TransitionModel, PolicyNet, StochPolicyNet
-from planner import MPCPlanner, POPA1Planner, POPA2Planner, POP_P_Planner, MPPI_Planner
+from planner import MPCPlanner, POPA1Planner, POPA2Planner, POP_P_Planner, MPPI_Planner, POP_P_MPPI
 from utils import lineplot, write_video
 import ipdb
 
 
 # Hyperparameters
 parser = argparse.ArgumentParser(description='PlaNet')
-parser.add_argument('--id', type=str, default='newmppi', help='Experiment ID')
+parser.add_argument('--id', type=str, default='trialz', help='Experiment ID')
 parser.add_argument('--seed', type=int, default=1, metavar='S', help='Random seed')
 parser.add_argument('--disable-cuda', action='store_true', help='Disable CUDA')
 parser.add_argument('--env', type=str, default='cheetah-run', choices=GYM_ENVS + CONTROL_SUITE_ENVS, help='Gym/Control Suite environment')
@@ -65,6 +65,7 @@ parser.add_argument('--render', action='store_true', help='Render environment')
 parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigma value for CEM')
 parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
 parser.add_argument('--stoch-policy', type=bool, default=False, help='Use a stochastic policy')
+parser.add_argument('--detach-policy', type=bool, default=False, help='no updates from policy to model')
 parser.add_argument('--use-value', type=bool, default=False, help='Use a value network')
 parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
 parser.add_argument('--policy-reduce', type=str, default='mean', help='policy loss reduction')
@@ -120,25 +121,28 @@ elif not args.test:
 		metrics['episodes'].append(s)
 
 
-
 # Initialise model parameters randomly
 transition_model = TransitionModel(args.belief_size, args.state_size, env.action_size, args.hidden_size, args.embedding_size, args.activation_function).to(device=args.device)
 observation_model = ObservationModel(args.symbolic_env, env.observation_size, args.belief_size, args.state_size, args.embedding_size, args.activation_function).to(device=args.device)
 reward_model = RewardModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
 encoder = Encoder(args.symbolic_env, env.observation_size, args.embedding_size, args.activation_function).to(device=args.device)
 param_list = list(transition_model.parameters()) + list(observation_model.parameters()) + list(reward_model.parameters()) + list(encoder.parameters())
-optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
 
 if args.use_policy:
 	if args.stoch_policy:
 		policy_net = StochPolicyNet(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
 	else:
 		policy_net = PolicyNet(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
-	policy_optimizer = optim.Adam(policy_net.parameters(), lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)	
+	if args.detach_policy:
+		policy_optimizer = optim.Adam(policy_net.parameters(), lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)	
+	else:
+		param_list += list(policy_net.parameters())
 
 if args.use_value:
 	value_net = ReturnModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
 	value_optimizer = optim.Adam(value_net.parameters(), lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
+
+optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
 
 
 if args.models is not '' and os.path.exists(args.models):
@@ -171,6 +175,8 @@ elif args.planner == "POP_MP_Planner":
 	planner = POP_MP_Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma)
 elif args.planner == "MPPI_Planner":
 	planner = MPPI_Planner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, env.action_range[0], env.action_range[1], args.initial_sigma, args.mppi_gamma, args.mppi_beta)
+elif args.planner == "POP_P_MPPI":
+	planner = POP_P_MPPI(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, policy_net, env.action_range[0], env.action_range[1], args.initial_sigma, args.mppi_gamma, args.mppi_beta)
 
 
 global_prior = Normal(torch.zeros(args.batch_size, args.state_size, device=args.device), torch.ones(args.batch_size, args.state_size, device=args.device))  # Global prior N(0, I)
@@ -218,7 +224,7 @@ if args.test:
 for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total=args.episodes, initial=metrics['episodes'][-1] + 1):
 	# Model fitting
 	
-	losses = []
+	"""losses = []
 	for s in tqdm(range(args.collect_interval)):
 		# Draw sequence chunks {(o_t, a_t, r_t+1, terminal_t+1)} ~ D uniformly at random from the dataset (including terminal flags)
 		observations, actions, rewards, nonterminals = D.sample(args.batch_size, args.chunk_size)  # Transitions start at time t = 0
@@ -231,6 +237,8 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 		observation_loss = F.mse_loss(bottle(observation_model, (beliefs, posterior_states)), observations[1:], reduction='none').sum(dim=2 if args.symbolic_env else (2, 3, 4)).mean(dim=(0, 1))
 		reward_loss = F.mse_loss(bottle(reward_model, (beliefs, posterior_states)), rewards[:-1], reduction='none').mean(dim=(0, 1))
 		kl_loss = torch.max(kl_divergence(Normal(posterior_means, posterior_std_devs), Normal(prior_means, prior_std_devs)).sum(dim=2), free_nats).mean(dim=(0, 1))  # Note that normalisation by overshooting distance and weighting by overshooting distance cancel out
+
+
 		
 		# Apply linearly ramping learning rate schedule
 		if args.learning_rate_schedule != 0:
@@ -240,11 +248,20 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 		
 		optimiser.zero_grad()
 		total_loss = observation_loss + reward_loss + kl_loss
+		if args.use_policy and not args.detach_policy and not args.stoch_policy:
+			policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
+			if args.policy_reduce == 'sum':
+				policy_loss = policy_loss.sum()
+			else:
+				policy_loss = policy_loss.mean()
+			total_loss += policy_loss
 		total_loss.backward()
 		nn.utils.clip_grad_norm_(param_list, args.grad_clip_norm, norm_type=2)
 		optimiser.step()
 		# Store (0) observation loss (1) reward loss (2) KL loss
 		losses.append([observation_loss.item(), reward_loss.item(), kl_loss.item()])
+		if args.use_policy and not args.detach_policy and not args.stoch_policy:
+			losses[-1].append(policy_loss.item())
 		
 		if args.use_value:
 			beliefs = beliefs.detach()
@@ -259,24 +276,25 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 			losses[-1].append(return_loss.item())
 
 		if args.use_policy:
-			beliefs = beliefs.detach()
-			posterior_states = posterior_states.detach()
-			if not args.stoch_policy:
-				policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
-			else:
-				pred_return = bottle(value_net, (beliefs, posterior_states))
-				policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:])).sum(2)
-				policy_loss = policy_loss * torch.exp((returns[1:]-pred_return.detach())*0.05).clamp_(max=20)
-			if args.policy_reduce == 'sum':
-				policy_loss = policy_loss.sum()
-			else:
-				policy_loss = policy_loss.mean()
-			policy_optimizer.zero_grad()
-			total_loss = policy_loss
-			total_loss.backward()
-			nn.utils.clip_grad_norm_(policy_net.parameters(), args.grad_clip_norm, norm_type=2)
-			policy_optimizer.step()
-			losses[-1].append(policy_loss.item())
+			if args.detach_policy:
+				beliefs = beliefs.detach()
+				posterior_states = posterior_states.detach()
+				if not args.stoch_policy:
+					policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
+				else:
+					pred_return = bottle(value_net, (beliefs, posterior_states))
+					policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:])).sum(2)
+					policy_loss = policy_loss * torch.exp((returns[1:]-pred_return.detach())*0.05).clamp_(max=20)
+				if args.policy_reduce == 'sum':
+					policy_loss = policy_loss.sum()
+				else:
+					policy_loss = policy_loss.mean()
+				policy_optimizer.zero_grad()
+				total_loss = policy_loss
+				total_loss.backward()
+				nn.utils.clip_grad_norm_(policy_net.parameters(), args.grad_clip_norm, norm_type=2)
+				policy_optimizer.step()
+				losses[-1].append(policy_loss.item())
 
 	# Update and plot loss metrics
 	losses = tuple(zip(*losses))
@@ -294,7 +312,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 		lineplot(metrics['episodes'][-len(metrics['policy_loss']):], metrics['policy_loss'], 'policy_loss', results_dir)
 		
 	
-	# Data collection
+	"""# Data collection
 	with torch.no_grad():
 		observation, total_reward = env.reset(), 0
 		belief, posterior_state, action = torch.zeros(1, args.belief_size, device=args.device), torch.zeros(1, args.state_size, device=args.device), torch.zeros(1, env.action_size, device=args.device)
