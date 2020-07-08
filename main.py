@@ -154,7 +154,8 @@ if args.models is not '' and os.path.exists(args.models):
 	optimiser.load_state_dict(model_dicts['optimiser'])
 	if args.use_policy:
 		policy_net.load_state_dict(model_dicts['policy_net'])
-		policy_optimizer.load_state_dict(model_dicts['policy_optimizer'])
+		if args.detach_policy:
+			policy_optimizer.load_state_dict(model_dicts['policy_optimizer'])
 	if args.use_value:
 		value_net.load_state_dict(model_dicts['value_net'])
 		value_optimizer.load_state_dict(model_dicts['value_optimizer'])
@@ -390,7 +391,8 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 		saver = {'transition_model': transition_model.state_dict(), 'observation_model': observation_model.state_dict(), 'reward_model': reward_model.state_dict(), 'encoder': encoder.state_dict(), 'optimiser': optimiser.state_dict()} 
 		if args.use_policy:
 			saver['policy_net'] = policy_net.state_dict()
-			saver['policy_optimizer'] = policy_optimizer.state_dict()
+			if args.detach_policy:
+				saver['policy_optimizer'] = policy_optimizer.state_dict()
 		if args.use_value:
 			saver['value_net'] = value_net.state_dict()
 			saver['value_optimizer'] = value_optimizer.state_dict()
