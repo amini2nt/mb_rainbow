@@ -10,8 +10,8 @@ from torch.nn import functional as F
 from torchvision.utils import make_grid, save_image
 from tqdm import tqdm
 from env import CONTROL_SUITE_ENVS, Env, GYM_ENVS, EnvBatcher
-from memory import ExperienceReplay
-from models import bottle, Encoder, ObservationModel, RewardModel, ReturnModel, TransitionModel, PolicyNet, StochPolicyNet
+from memory import ExperienceReplayv2 as ExperienceReplay
+from models import bottle, Encoder, ObservationModel, RewardModel, ReturnModel, TransitionModel, PolicyNet, StochPolicyNet, AdvantageModel
 from planner import MPCPlanner, POPA1Planner, POPA2Planner, POP_P_Planner, MPPI_Planner, POP_P_MPPI
 from utils import lineplot, write_video
 import ipdb
@@ -19,7 +19,7 @@ import ipdb
 
 # Hyperparameters
 parser = argparse.ArgumentParser(description='PlaNet')
-parser.add_argument('--id', type=str, default='trialz', help='Experiment ID')
+parser.add_argument('--id', type=str, default='trialz_huber', help='Experiment ID')
 parser.add_argument('--seed', type=int, default=1, metavar='S', help='Random seed')
 parser.add_argument('--disable-cuda', action='store_true', help='Disable CUDA')
 parser.add_argument('--env', type=str, default='cheetah-run', choices=GYM_ENVS + CONTROL_SUITE_ENVS, help='Gym/Control Suite environment')
@@ -63,14 +63,16 @@ parser.add_argument('--experience-replay', type=str, default='', metavar='ER', h
 parser.add_argument('--render', action='store_true', help='Render environment')
 # New set of hyper-parameters
 parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigma value for CEM')
-parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
+parser.add_argument('--use-policy', type=bool, default=True, help='Use a policy network')
 parser.add_argument('--stoch-policy', type=bool, default=False, help='Use a stochastic policy')
 parser.add_argument('--detach-policy', type=bool, default=False, help='no updates from policy to model')
-parser.add_argument('--use-value', type=bool, default=False, help='Use a value network')
-parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
+parser.add_argument('--use-value', type=bool, default=True, help='Use a value network')
+parser.add_argument('--planner', type=str, default='POP_P_Planner', help='Type of planner')
 parser.add_argument('--policy-reduce', type=str, default='mean', help='policy loss reduction')
-parser.add_argument('--mppi-gamma', type=float, default=1.5, help='MPPI gamma')
-parser.add_argument('--mppi-beta', type=float, default=0.5, help='MPPI beta')
+parser.add_argument('--mppi-gamma', type=float, default=2, help='MPPI gamma')
+parser.add_argument('--mppi-beta', type=float, default=0.6, help='MPPI beta')
+parser.add_argument('--marwil-kappa', type=float, default=1, help='kappa for marwil')
+
 
 
 args = parser.parse_args()
@@ -97,6 +99,7 @@ if args.use_policy:
 	metrics['policy_loss'] = []
 if args.use_value:
 	metrics['value_loss'] = []
+	metrics['advantage_loss'] = []
 
 torch.save(args, os.path.join(results_dir, 'args.pth'))
 
@@ -140,9 +143,18 @@ if args.use_policy:
 
 if args.use_value:
 	value_net = ReturnModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
-	value_optimizer = optim.Adam(value_net.parameters(), lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
+	adv_net = AdvantageModel(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
+	if args.detach_policy:
+		params = list(value_net.parameters()) + list(adv_net.parameters())
+		value_optimizer = optim.Adam(params, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
+	else:
+		param_list += list(value_net.parameters())
+		param_list += list(adv_net.parameters())
 
 optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
+
+
+policy_net.ma_adv_norm = torch.tensor([0], dtype=torch.float32, requires_grad=False, device=args.device)
 
 
 if args.models is not '' and os.path.exists(args.models):
@@ -158,7 +170,9 @@ if args.models is not '' and os.path.exists(args.models):
 			policy_optimizer.load_state_dict(model_dicts['policy_optimizer'])
 	if args.use_value:
 		value_net.load_state_dict(model_dicts['value_net'])
-		value_optimizer.load_state_dict(model_dicts['value_optimizer'])
+		adv_net.load_state_dict(model_dicts['adv_net'])
+		if args.detach_policy:
+			value_optimizer.load_state_dict(model_dicts['value_optimizer'])
 
 if args.planner == "CEM":
 	planner = MPCPlanner(env.action_size, args.planning_horizon, args.optimisation_iters, args.candidates, args.top_candidates, transition_model, reward_model, env.action_range[0], env.action_range[1], args.initial_sigma)
@@ -228,7 +242,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 	losses = []
 	for s in tqdm(range(args.collect_interval)):
 		# Draw sequence chunks {(o_t, a_t, r_t+1, terminal_t+1)} ~ D uniformly at random from the dataset (including terminal flags)
-		observations, actions, rewards, nonterminals = D.sample(args.batch_size, args.chunk_size)  # Transitions start at time t = 0
+		observations, actions, rewards, nonterminals, returns = D.sample(args.batch_size, args.chunk_size)  # Transitions start at time t = 0
 		# Create initial belief and state for time t = 0
 		init_belief, init_state = torch.zeros(args.batch_size, args.belief_size, device=args.device), torch.zeros(args.batch_size, args.state_size, device=args.device)
 		encoded_obs = bottle(encoder, (observations, ))
@@ -247,55 +261,81 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 				group['lr'] = min(group['lr'] + args.learning_rate / args.learning_rate_schedule, args.learning_rate)
 		# Update model parameters
 		
-		optimiser.zero_grad()
 		total_loss = observation_loss + reward_loss + kl_loss
-		if args.use_policy and not args.detach_policy and not args.stoch_policy:
+		"""if args.use_policy and not args.detach_policy and not args.stoch_policy:
+			
 			policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
 			if args.policy_reduce == 'sum':
 				policy_loss = policy_loss.sum()
 			else:
 				policy_loss = policy_loss.mean()
-			total_loss += policy_loss
+			total_loss += policy_loss"""
+
+		if args.use_policy:
+
+			if args.detach_policy:
+				beliefs = beliefs.detach()
+				posterior_states = posterior_states.detach()
+
+			if args.stoch_policy:
+				policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:])).sum(2)
+			else:
+				policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
+
+			if args.use_value:
+				pred_return = bottle(value_net, (beliefs, posterior_states))
+				return_loss = F.mse_loss(pred_return, returns[1:], reduction='none').mean(dim=(0, 1))
+				adv_target = pred_return.detach() - returns[1:]
+				pred_adv = bottle(adv_net, (beliefs, posterior_states, actions[1:]))
+				adv_loss = F.mse_loss(pred_adv, adv_target, reduction='none').mean(dim=(0, 1))
+				
+				if args.detach_policy:
+					value_optimizer.zero_grad()
+					value_loss = return_loss + adv_loss
+					value_loss.backward()
+					nn.utils.clip_grad_norm_(value_net.parameters(), args.grad_clip_norm, norm_type=2)
+					nn.utils.clip_grad_norm_(adv_net.parameters(), args.grad_clip_norm, norm_type=2)
+					value_optimizer.step()
+
+				else:
+
+					total_loss += return_loss + adv_loss
+
+				# Update averaged advantage norm.
+				policy_net.ma_adv_norm.add_(1e-8 * (torch.mean(torch.pow(adv_target, 2.0)) - policy_net.ma_adv_norm))
+				#policy_net.ma_adv_norm = 0.9 * policy_net.ma_adv_norm + 0.1 * torch.mean(torch.pow(adv_target, 2.0))
+				# #xponentially weighted advantages.
+				exp_advs = torch.exp(args.marwil_kappa *(pred_adv / (1e-8 + torch.pow(policy_net.ma_adv_norm, 0.5)))).clamp_(max=20)
+
+				if not args.stoch_policy:
+					exp_advs = exp_advs.unsqueeze(2)
+
+				policy_loss = policy_loss * exp_advs.detach()
+			if args.policy_reduce == 'sum':
+				policy_loss = policy_loss.sum()
+			else:
+				policy_loss = policy_loss.mean()
+			
+			if args.detach_policy:
+				policy_optimizer.zero_grad()
+				policy_loss.backward()
+				nn.utils.clip_grad_norm_(policy_net.parameters(), args.grad_clip_norm, norm_type=2)
+				policy_optimizer.step()
+			else:
+				total_loss += policy_loss				
+
+		optimiser.zero_grad()
 		total_loss.backward()
 		nn.utils.clip_grad_norm_(param_list, args.grad_clip_norm, norm_type=2)
 		optimiser.step()
 		# Store (0) observation loss (1) reward loss (2) KL loss
 		losses.append([observation_loss.item(), reward_loss.item(), kl_loss.item()])
-		if args.use_policy and not args.detach_policy and not args.stoch_policy:
-			losses[-1].append(policy_loss.item())
-		
-		if args.use_value:
-			beliefs = beliefs.detach()
-			posterior_states = posterior_states.detach()
-			pred_return = bottle(value_net, (beliefs, posterior_states))
-			return_loss = F.mse_loss(pred_return, returns[1:], reduction='none').mean(dim=(0, 1))
-			value_optimizer.zero_grad()
-			total_loss = return_loss
-			total_loss.backward()
-			nn.utils.clip_grad_norm_(value_net.parameters(), args.grad_clip_norm, norm_type=2)
-			value_optimiser.step()
-			losses[-1].append(return_loss.item())
-
 		if args.use_policy:
-			if args.detach_policy:
-				beliefs = beliefs.detach()
-				posterior_states = posterior_states.detach()
-				if not args.stoch_policy:
-					policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
-				else:
-					pred_return = bottle(value_net, (beliefs, posterior_states))
-					policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:])).sum(2)
-					policy_loss = policy_loss * torch.exp((returns[1:]-pred_return.detach())*0.05).clamp_(max=20)
-				if args.policy_reduce == 'sum':
-					policy_loss = policy_loss.sum()
-				else:
-					policy_loss = policy_loss.mean()
-				policy_optimizer.zero_grad()
-				total_loss = policy_loss
-				total_loss.backward()
-				nn.utils.clip_grad_norm_(policy_net.parameters(), args.grad_clip_norm, norm_type=2)
-				policy_optimizer.step()
-				losses[-1].append(policy_loss.item())
+			if args.use_value:
+				losses[-1].append(return_loss.item())
+				losses[-1].append(adv_loss.item())
+			losses[-1].append(policy_loss.item())				
+
 
 	# Update and plot loss metrics
 	losses = tuple(zip(*losses))
@@ -308,6 +348,8 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 	if args.use_value:
 		metrics['value_loss'].append(losses[3])
 		lineplot(metrics['episodes'][-len(metrics['value_loss']):], metrics['value_loss'], 'value_loss', results_dir)
+		metrics['advantage_loss'].append(losses[4])
+		lineplot(metrics['episodes'][-len(metrics['advantage_loss']):], metrics['advantage_loss'], 'advantage_loss', results_dir)
 	if args.use_policy:
 		metrics['policy_loss'].append(losses[-1])
 		lineplot(metrics['episodes'][-len(metrics['policy_loss']):], metrics['policy_loss'], 'policy_loss', results_dir)
@@ -345,6 +387,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 			policy_net.eval()
 		if args.use_value:
 			value_net.eval()
+			adv_net.eval()
 		# Initialise parallelised test environments
 		test_envs = EnvBatcher(Env, (args.env, args.symbolic_env, args.seed, args.max_episode_length, args.action_repeat, args.bit_depth), {}, args.test_episodes)
 		
@@ -382,6 +425,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 			policy_net.train()
 		if args.use_value:
 			value_net.train()
+			adv_net.train()
 		# Close test environments
 		test_envs.close()
 
@@ -395,7 +439,9 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 				saver['policy_optimizer'] = policy_optimizer.state_dict()
 		if args.use_value:
 			saver['value_net'] = value_net.state_dict()
-			saver['value_optimizer'] = value_optimizer.state_dict()
+			saver['adv_net']  = adv_net.state_dict()
+			if args.detach_policy:
+				saver['value_optimizer'] = value_optimizer.state_dict()
 		torch.save(saver, os.path.join(results_dir, 'models_%d.pth' % episode))
 		if args.checkpoint_experience:
 			torch.save(D, os.path.join(results_dir, 'experience.pth'))  # Warning: will fail with MemoryError with large memory sizes
