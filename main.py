@@ -19,7 +19,7 @@ import ipdb
 
 # Hyperparameters
 parser = argparse.ArgumentParser(description='PlaNet')
-parser.add_argument('--id', type=str, default='trialz_huber', help='Experiment ID')
+parser.add_argument('--id', type=str, default='fcem', help='Experiment ID')
 parser.add_argument('--seed', type=int, default=1, metavar='S', help='Random seed')
 parser.add_argument('--disable-cuda', action='store_true', help='Disable CUDA')
 parser.add_argument('--env', type=str, default='cheetah-run', choices=GYM_ENVS + CONTROL_SUITE_ENVS, help='Gym/Control Suite environment')
@@ -63,11 +63,11 @@ parser.add_argument('--experience-replay', type=str, default='', metavar='ER', h
 parser.add_argument('--render', action='store_true', help='Render environment')
 # New set of hyper-parameters
 parser.add_argument('--initial-sigma', type=float, default=1, help='Initial sigma value for CEM')
-parser.add_argument('--use-policy', type=bool, default=True, help='Use a policy network')
+parser.add_argument('--use-policy', type=bool, default=False, help='Use a policy network')
 parser.add_argument('--stoch-policy', type=bool, default=False, help='Use a stochastic policy')
 parser.add_argument('--detach-policy', type=bool, default=False, help='no updates from policy to model')
-parser.add_argument('--use-value', type=bool, default=True, help='Use a value network')
-parser.add_argument('--planner', type=str, default='POP_P_Planner', help='Type of planner')
+parser.add_argument('--use-value', type=bool, default=False, help='Use a value network')
+parser.add_argument('--planner', type=str, default='CEM', help='Type of planner')
 parser.add_argument('--policy-reduce', type=str, default='mean', help='policy loss reduction')
 parser.add_argument('--mppi-gamma', type=float, default=2, help='MPPI gamma')
 parser.add_argument('--mppi-beta', type=float, default=0.6, help='MPPI beta')
@@ -154,7 +154,8 @@ if args.use_value:
 optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
 
 
-policy_net.ma_adv_norm = torch.tensor([0], dtype=torch.float32, requires_grad=False, device=args.device)
+if args.use_value:
+	policy_net.ma_adv_norm = torch.tensor([0], dtype=torch.float32, requires_grad=False, device=args.device)
 
 
 if args.models is not '' and os.path.exists(args.models):
