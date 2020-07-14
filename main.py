@@ -56,7 +56,7 @@ parser.add_argument('--top-candidates', type=int, default=100, metavar='K', help
 parser.add_argument('--test', action='store_true', help='Test only')
 parser.add_argument('--test-interval', type=int, default=10, metavar='I', help='Test interval (episodes)')
 parser.add_argument('--test-episodes', type=int, default=10, metavar='E', help='Number of test episodes')
-parser.add_argument('--checkpoint-interval', type=int, default=50, metavar='I', help='Checkpoint interval (episodes)')
+parser.add_argument('--checkpoint-interval', type=int, default=500, metavar='I', help='Checkpoint interval (episodes)')
 parser.add_argument('--checkpoint-experience', action='store_true', help='Checkpoint experience replay')
 parser.add_argument('--models', type=str, default='', metavar='M', help='Load model checkpoint')
 parser.add_argument('--experience-replay', type=str, default='', metavar='ER', help='Load experience replay')
@@ -72,6 +72,7 @@ parser.add_argument('--policy-reduce', type=str, default='mean', help='policy lo
 parser.add_argument('--mppi-gamma', type=float, default=2, help='MPPI gamma')
 parser.add_argument('--mppi-beta', type=float, default=0.6, help='MPPI beta')
 parser.add_argument('--marwil-kappa', type=float, default=1, help='kappa for marwil')
+parser.add_argument('--res-dir', type=str, default='results', help='directory location')
 
 
 
@@ -83,7 +84,7 @@ for k, v in vars(args).items():
 
 
 # Setup
-results_dir = os.path.join('results', args.id)
+results_dir = os.path.join(args.res_dir, args.id)
 os.makedirs(results_dir, exist_ok=True)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
