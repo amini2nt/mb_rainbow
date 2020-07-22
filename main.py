@@ -3,6 +3,8 @@ from math import inf
 import os
 import numpy as np
 import torch
+import gym
+import mujoco_py
 from torch import nn, optim
 from torch.distributions import Normal
 from torch.distributions.kl import kl_divergence
