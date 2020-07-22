@@ -44,11 +44,11 @@ parser.add_argument('--overshooting-reward-scale', type=float, default=0, metava
 parser.add_argument('--global-kl-beta', type=float, default=0, metavar='βg', help='Global KL weight (0 to disable)')
 parser.add_argument('--free-nats', type=float, default=3, metavar='F', help='Free nats')
 parser.add_argument('--bit-depth', type=int, default=5, metavar='B', help='Image bit depth (quantisation)')
-parser.add_argument('--learning-rate', type=float, default=1e-3, metavar='α', help='Learning rate') 
+parser.add_argument('--learning-rate', type=float, default=6e-4, metavar='α', help='Learning rate') 
 parser.add_argument('--learning-rate-schedule', type=int, default=0, metavar='αS', help='Linear learning rate schedule (optimisation steps from 0 to final learning rate; 0 to disable)') 
-parser.add_argument('--adam-epsilon', type=float, default=1e-4, metavar='ε', help='Adam optimiser epsilon value') 
+parser.add_argument('--adam-epsilon', type=float, default=1e-3, metavar='ε', help='Adam optimiser epsilon value') 
 # Note that original has a linear learning rate decay, but it seems unlikely that this makes a significant difference
-parser.add_argument('--grad-clip-norm', type=float, default=1000, metavar='C', help='Gradient clipping norm')
+parser.add_argument('--grad-clip-norm', type=float, default=100, metavar='C', help='Gradient clipping norm')
 parser.add_argument('--planning-horizon', type=int, default=12, metavar='H', help='Planning horizon distance')
 parser.add_argument('--optimisation-iters', type=int, default=10, metavar='I', help='Planning optimisation iterations')
 parser.add_argument('--candidates', type=int, default=1000, metavar='J', help='Candidate samples per iteration')
@@ -100,7 +100,7 @@ if args.use_policy:
 	metrics['policy_loss'] = []
 if args.use_value:
 	metrics['value_loss'] = []
-	metrics['advantage_loss'] = []
+	#metrics['advantage_loss'] = []
 
 torch.save(args, os.path.join(results_dir, 'args.pth'))
 
@@ -138,19 +138,19 @@ if args.use_policy:
 	else:
 		policy_net = PolicyNet(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
 	if args.detach_policy:
-		policy_optimizer = optim.Adam(policy_net.parameters(), lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)	
+		policy_optimizer = optim.Adam(policy_net.parameters(), lr=1e-3, eps=args.adam_epsilon)	
 	else:
 		param_list += list(policy_net.parameters())
 
 if args.use_value:
 	value_net = ReturnModel(args.belief_size, args.state_size, args.hidden_size, args.activation_function).to(device=args.device)
-	adv_net = AdvantageModel(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
+	#adv_net = AdvantageModel(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
 	if args.detach_policy:
-		params = list(value_net.parameters()) + list(adv_net.parameters())
-		value_optimizer = optim.Adam(params, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
+		params = list(value_net.parameters()) #+ list(adv_net.parameters())
+		value_optimizer = optim.Adam(params, lr=2e-3, eps=args.adam_epsilon)
 	else:
 		param_list += list(value_net.parameters())
-		param_list += list(adv_net.parameters())
+		#param_list += list(adv_net.parameters())
 
 optimiser = optim.Adam(param_list, lr=0 if args.learning_rate_schedule != 0 else args.learning_rate, eps=args.adam_epsilon)
 
@@ -172,7 +172,7 @@ if args.models is not '' and os.path.exists(args.models):
 			policy_optimizer.load_state_dict(model_dicts['policy_optimizer'])
 	if args.use_value:
 		value_net.load_state_dict(model_dicts['value_net'])
-		adv_net.load_state_dict(model_dicts['adv_net'])
+		#adv_net.load_state_dict(model_dicts['adv_net'])
 		if args.detach_policy:
 			value_optimizer.load_state_dict(model_dicts['value_optimizer'])
 
@@ -206,7 +206,7 @@ def update_belief_and_act(args, env, planner, transition_model, encoder, belief,
 	belief, posterior_state = belief.squeeze(dim=0), posterior_state.squeeze(dim=0)  # Remove time dimension from belief/state
 	action = planner(belief, posterior_state)  # Get action from planner(q(s_t|o≤t,a<t), p)
 	if explore:
-		action = action + args.action_noise * torch.randn_like(action)  # Add exploration noise ε ~ p(ε) to the action
+		action = action + np.sqrt(args.action_noise) * torch.randn_like(action)  # Add exploration noise ε ~ p(ε) to the action
 	action.clamp_(min=min_action, max=max_action)  # Clip action range
 	next_observation, reward, done = env.step(action.cpu() if isinstance(env, EnvBatcher) else action[0].cpu())  # Perform environment step (action repeats handled internally)
 	return belief, posterior_state, action, next_observation, reward, done
@@ -280,37 +280,37 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 				posterior_states = posterior_states.detach()
 
 			if args.stoch_policy:
-				policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:])).sum(2)
+				policy_loss = -bottle(policy_net.logp, (beliefs, posterior_states, actions[1:]))#.sum(2)
 			else:
 				policy_loss = F.mse_loss(bottle(policy_net, (beliefs, posterior_states)), actions[1:], reduction='none')
 
 			if args.use_value:
 				pred_return = bottle(value_net, (beliefs, posterior_states))
 				return_loss = F.mse_loss(pred_return, returns[1:], reduction='none').mean(dim=(0, 1))
-				adv_target = pred_return.detach() - returns[1:]
-				pred_adv = bottle(adv_net, (beliefs, posterior_states, actions[1:]))
-				adv_loss = F.mse_loss(pred_adv, adv_target, reduction='none').mean(dim=(0, 1))
+				adv_target = returns[1:] - pred_return.detach()
+				#pred_adv = bottle(adv_net, (beliefs, posterior_states, actions[1:]))
+				#adv_loss = F.mse_loss(pred_adv, adv_target, reduction='none').mean(dim=(0, 1))
 				
 				if args.detach_policy:
 					value_optimizer.zero_grad()
-					value_loss = return_loss + adv_loss
+					value_loss = return_loss #+ adv_loss
 					value_loss.backward()
 					nn.utils.clip_grad_norm_(value_net.parameters(), args.grad_clip_norm, norm_type=2)
-					nn.utils.clip_grad_norm_(adv_net.parameters(), args.grad_clip_norm, norm_type=2)
+					#nn.utils.clip_grad_norm_(adv_net.parameters(), args.grad_clip_norm, norm_type=2)
 					value_optimizer.step()
 
 				else:
 
-					total_loss += return_loss + adv_loss
+					total_loss += return_loss #+ adv_loss
 
 				# Update averaged advantage norm.
 				policy_net.ma_adv_norm.add_(1e-8 * (torch.mean(torch.pow(adv_target, 2.0)) - policy_net.ma_adv_norm))
 				#policy_net.ma_adv_norm = 0.9 * policy_net.ma_adv_norm + 0.1 * torch.mean(torch.pow(adv_target, 2.0))
 				# #xponentially weighted advantages.
-				exp_advs = torch.exp(args.marwil_kappa *(pred_adv / (1e-8 + torch.pow(policy_net.ma_adv_norm, 0.5)))).clamp_(max=20)
+				exp_advs = torch.exp(args.marwil_kappa *(adv_target / (1e-8 + torch.pow(policy_net.ma_adv_norm, 0.5)))).clamp_(max=20)
 
-				if not args.stoch_policy:
-					exp_advs = exp_advs.unsqueeze(2)
+				#if not args.stoch_policy:
+				exp_advs = exp_advs.unsqueeze(2)
 
 				policy_loss = policy_loss * exp_advs.detach()
 			if args.policy_reduce == 'sum':
@@ -335,7 +335,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 		if args.use_policy:
 			if args.use_value:
 				losses[-1].append(return_loss.item())
-				losses[-1].append(adv_loss.item())
+				#losses[-1].append(adv_loss.item())
 			losses[-1].append(policy_loss.item())				
 
 
@@ -350,8 +350,8 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 	if args.use_value:
 		metrics['value_loss'].append(losses[3])
 		lineplot(metrics['episodes'][-len(metrics['value_loss']):], metrics['value_loss'], 'value_loss', results_dir)
-		metrics['advantage_loss'].append(losses[4])
-		lineplot(metrics['episodes'][-len(metrics['advantage_loss']):], metrics['advantage_loss'], 'advantage_loss', results_dir)
+		#metrics['advantage_loss'].append(losses[4])
+		#lineplot(metrics['episodes'][-len(metrics['advantage_loss']):], metrics['advantage_loss'], 'advantage_loss', results_dir)
 	if args.use_policy:
 		metrics['policy_loss'].append(losses[-1])
 		lineplot(metrics['episodes'][-len(metrics['policy_loss']):], metrics['policy_loss'], 'policy_loss', results_dir)
@@ -389,7 +389,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 			policy_net.eval()
 		if args.use_value:
 			value_net.eval()
-			adv_net.eval()
+			#adv_net.eval()
 		# Initialise parallelised test environments
 		test_envs = EnvBatcher(Env, (args.env, args.symbolic_env, args.seed, args.max_episode_length, args.action_repeat, args.bit_depth), {}, args.test_episodes)
 		
@@ -427,7 +427,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 			policy_net.train()
 		if args.use_value:
 			value_net.train()
-			adv_net.train()
+			#adv_net.train()
 		# Close test environments
 		test_envs.close()
 
@@ -441,7 +441,7 @@ for episode in tqdm(range(metrics['episodes'][-1] + 1, args.episodes + 1), total
 				saver['policy_optimizer'] = policy_optimizer.state_dict()
 		if args.use_value:
 			saver['value_net'] = value_net.state_dict()
-			saver['adv_net']  = adv_net.state_dict()
+			#saver['adv_net']  = adv_net.state_dict()
 			if args.detach_policy:
 				saver['value_optimizer'] = value_optimizer.state_dict()
 		torch.save(saver, os.path.join(results_dir, 'models_%d.pth' % episode))

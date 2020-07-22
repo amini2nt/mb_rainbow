@@ -141,13 +141,15 @@ class ReturnModel(jit.ScriptModule):
     self.act_fn = getattr(F, activation_function)
     self.fc1 = nn.Linear(belief_size + state_size, hidden_size)
     self.fc2 = nn.Linear(hidden_size, hidden_size)
-    self.fc3 = nn.Linear(hidden_size, 1)
+    self.fc3 = nn.Linear(hidden_size, hidden_size)
+    self.fc4 = nn.Linear(hidden_size, 1)
 
   @jit.script_method
   def forward(self, belief, state):
     hidden = self.act_fn(self.fc1(torch.cat([belief, state], dim=1)))
     hidden = self.act_fn(self.fc2(hidden))
-    returns = self.fc3(hidden).squeeze(dim=1)
+    hidden = self.act_fn(self.fc3(hidden))
+    returns = self.fc4(hidden).squeeze(dim=1)
     return returns
 
 class AdvantageModel(jit.ScriptModule):
@@ -156,13 +158,15 @@ class AdvantageModel(jit.ScriptModule):
     self.act_fn = getattr(F, activation_function)
     self.fc1 = nn.Linear(belief_size + state_size + action_size, hidden_size)
     self.fc2 = nn.Linear(hidden_size, hidden_size)
-    self.fc3 = nn.Linear(hidden_size, 1)
+    self.fc3 = nn.Linear(hidden_size, hidden_size)
+    self.fc4 = nn.Linear(hidden_size, 1)
 
   @jit.script_method
   def forward(self, belief, state, action):
     hidden = self.act_fn(self.fc1(torch.cat([belief, state, action], dim=1)))
     hidden = self.act_fn(self.fc2(hidden))
-    advs = self.fc3(hidden).squeeze(dim=1)
+    hidden = self.act_fn(self.fc3(hidden))
+    advs = self.fc4(hidden).squeeze(dim=1)
     return advs
 
 
@@ -212,6 +216,8 @@ class StochPolicyNet(jit.ScriptModule):
     self.state_size = state_size
     self.fc1 = nn.Linear(belief_size + state_size, hidden_size)
     self.fc2 = nn.Linear(hidden_size, hidden_size)
+    #self.ln1 = nn.LayerNorm(hidden_size)
+    #self.ln2 = nn.LayerNorm(hidden_size)
     self.fc3_mean = nn.Linear(hidden_size, action_size)
     self.fc3_std = nn.Linear(hidden_size, action_size)
     self.num_units = belief_size + state_size + 2*hidden_size
