@@ -3,8 +3,6 @@ from math import inf
 import os
 import numpy as np
 import torch
-import gym
-import mujoco_py
 from torch import nn, optim
 from torch.distributions import Normal
 from torch.distributions.kl import kl_divergence
@@ -75,6 +73,10 @@ parser.add_argument('--mppi-gamma', type=float, default=2, help='MPPI gamma')
 parser.add_argument('--mppi-beta', type=float, default=0.6, help='MPPI beta')
 parser.add_argument('--marwil-kappa', type=float, default=1, help='kappa for marwil')
 parser.add_argument('--res-dir', type=str, default='results', help='directory location')
+parser.add_argument('--policy-lr', type=float, default=1e-3, help='policy Learning rate')
+parser.add_argument('--value-lr', type=float, default=2e-3, help='policy Learning rate')
+parser.add_argument('--policy-adam', type=float, default=1e-3, help='policy Learning rate')
+parser.add_argument('--value-adam', type=float, default=1e-3, help='policy Learning rate')
 
 
 
@@ -140,7 +142,7 @@ if args.use_policy:
 	else:
 		policy_net = PolicyNet(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
 	if args.detach_policy:
-		policy_optimizer = optim.Adam(policy_net.parameters(), lr=1e-3, eps=args.adam_epsilon)	
+		policy_optimizer = optim.Adam(policy_net.parameters(), lr=args.policy_lr, eps=args.policy_adam)	
 	else:
 		param_list += list(policy_net.parameters())
 
@@ -149,7 +151,7 @@ if args.use_value:
 	#adv_net = AdvantageModel(args.belief_size, args.state_size, args.hidden_size, env.action_size, args.activation_function).to(device=args.device)
 	if args.detach_policy:
 		params = list(value_net.parameters()) #+ list(adv_net.parameters())
-		value_optimizer = optim.Adam(params, lr=2e-3, eps=args.adam_epsilon)
+		value_optimizer = optim.Adam(params, lr=args.value_lr, eps=args.value_adam)
 	else:
 		param_list += list(value_net.parameters())
 		#param_list += list(adv_net.parameters())
@@ -218,8 +220,13 @@ def update_belief_and_act(args, env, planner, transition_model, encoder, belief,
 if args.test:
 	# Set models to eval mode
 	transition_model.eval()
+	observation_model.eval()
 	reward_model.eval()
 	encoder.eval()
+	if args.use_policy:
+		policy_net.eval()
+	if args.use_value:
+		value_net.eval()
 	with torch.no_grad():
 		total_reward = 0
 		for _ in tqdm(range(args.test_episodes)):
