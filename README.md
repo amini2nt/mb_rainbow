@@ -32,19 +32,33 @@ Hyperparameters
 ------------
 
 '--initial-sigma' ==> 'Initial sigma value for CEM')
+
 '--use-policy' ==> 'Use a policy network')
+
 '--stoch-policy' ==> 'Use a stochastic policy')
+
 '--detach-policy' ==> 'no updates from policy to model')
+
 '--use-value' ==> 'Use a value network')
+
 '--planner' ==> 'Type of planner')
+
 '--policy-reduce' ==> 'policy loss reduction')
+
 '--mppi-gamma' ==> 'MPPI gamma')
+
 '--mppi-beta' ==> 'MPPI beta')
+
 '--marwil-kappa' ==> 'kappa for marwil')
+
 '--res-dir' ==> 'directory location')
+
 '--policy-lr' ==> 'policy Learning rate')
+
 '--value-lr' ==> 'policy Learning rate')
+
 '--policy-adam' ==> 'policy Learning rate')
+
 '--value-adam' ==> 'policy Learning rate')
 
 Links
