@@ -72,5 +72,7 @@ References
 ----------
 
 [1] [Learning Latent Dynamics for Planning from Pixels](https://arxiv.org/abs/1811.04551) 
+
 [2] [Exploring Model-based Planning with Policy Networks](https://arxiv.org/abs/1906.08649) 
+
 [3] [Deep Reinforcement Learning in a Handful of Trials using Probabilistic Dynamics Models](https://arxiv.org/abs/1805.12114)
