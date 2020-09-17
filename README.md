@@ -31,35 +31,28 @@ python main.py --id marwil_cartpole_k_0.5_sdetach_run_1 --seed 1 --env cartpole-
 Hyperparameters
 ------------
 
-'--initial-sigma' ==> 'Initial sigma value for CEM')
+'--initial-sigma' ==> 'Initial sigma value for CEM'
 
-'--use-policy' ==> 'Use a policy network')
+'--use-policy' ==> 'Use a policy network'
 
-'--stoch-policy' ==> 'Use a stochastic policy')
+'--stoch-policy' ==> 'Use a stochastic policy'
 
-'--detach-policy' ==> 'no updates from policy to model')
+'--detach-policy' ==> 'no updates from policy to model'
 
-'--use-value' ==> 'Use a value network')
+'--use-value' ==> 'Use a value network'
 
-'--planner' ==> 'Type of planner')
+'--planner' ==> 'Type of planner'
 
-'--policy-reduce' ==> 'policy loss reduction')
+'--policy-reduce' ==> 'policy loss reduction'
 
-'--mppi-gamma' ==> 'MPPI gamma')
+'--marwil-kappa' ==> 'kappa for marwil'
 
-'--mppi-beta' ==> 'MPPI beta')
+'--res-dir' ==> 'directory location'
 
-'--marwil-kappa' ==> 'kappa for marwil')
+'--policy-lr' ==> 'policy Learning rate'
 
-'--res-dir' ==> 'directory location')
+'--value-lr' ==> 'value network Learning rate'
 
-'--policy-lr' ==> 'policy Learning rate')
-
-'--value-lr' ==> 'policy Learning rate')
-
-'--policy-adam' ==> 'policy Learning rate')
-
-'--value-adam' ==> 'policy Learning rate')
 
 Links
 -----
