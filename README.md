@@ -3,7 +3,7 @@ PG+
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 
-PG+: Policy Guided Planning in Latent Space or PGPLaS (PG+) improves upon PlaNet by learning a policy in the latent space and then using the policy while doing decision-time planning. This work we show an efficient way to add noise to the policy parameters that speeds up the Cross Entropy Method (CEM) search in the policy space. Our experimental results show that PG+ achieves better performance than PlaNet in all five continuous control tasks that we considered
+PG+: Policy Guided Planning in Latent Space or PGPLaS (PG+) improves upon PlaNet by learning a policy in the latent space and then using the policy while doing decision-time planning. In this work, we show an efficient way to add noise to the policy parameters that speeds up the Cross Entropy Method (CEM) search in the policy space. Our experimental results show that PG+ achieves better performance than PlaNet in all five continuous control tasks that we considered
 
 
 
