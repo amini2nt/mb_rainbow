@@ -23,9 +23,10 @@ To install all dependencies with Anaconda run `conda env create -f environment.y
 Running
 ------------
 
-You can reproduce the results by running something like the following: 
+Following command will reproduce the results for Cheetah Run experiment: 
 
-python main.py --id marwil_cartpole_k_0.5_sdetach_run_1 --seed 1 --env cartpole-swingup --action-repeat 2 --use-policy True --use-value True --planner POP_P_Planner --detach-policy True --stoch-policy True --marwil-kappa 0.5
+python main.py --id cheetah2_sigma_0.1_run_1 --seed 1 --initial-sigma 0.1 --use-policy True --stoch-policy True --detach-policy True --use-value True --planner POP_P_Planner --marwil-kappa 0.7 --res-dir cheetah2 --policy-lr 1e-3 --policy-adam 1e-8 --value-lr 2e-3 --value-adam 1e-8 --learning-rate 6e-4 --adam-epsilon 1e-3 --env cheetah-run --action-repeat 2 
+
 
 
 Hyperparameters
